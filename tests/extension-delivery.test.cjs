@@ -180,6 +180,7 @@ host.activate(context)
 
 let receive
 registeredProvider.resolveWebviewView({
+  onDidDispose() {},
   webview: {
     cspSource: 'vscode-webview:',
     onDidReceiveMessage(callback) { receive = callback },

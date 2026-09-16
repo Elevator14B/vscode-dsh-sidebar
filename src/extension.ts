@@ -85,6 +85,18 @@ interface BridgeEnvelope {
   readonly sessionId?: string
   readonly message?: string
   readonly url?: string
+  /** Webview generation: discard buffered messages from replaced pages. */
+  readonly pageId?: string
+  readonly sentAt?: number
+  readonly health?: Record<string, unknown>
+  readonly proxy?: string
+  readonly backend?: string
+  readonly stalled?: boolean
+  readonly exhausted?: boolean
+  readonly connection?: string
+  readonly history?: string
+  readonly elapsedMs?: number
+  readonly runtimeId?: string
   /** Requested browser for `open-url`: 'internal' (default) or 'external'. */
   readonly target?: string
   /** Requested editor column for `open-file`: 'beside' opens in the side group. */
@@ -144,11 +156,16 @@ class Telemetry {
 
   /** Append one structured event and mirror it into the VSCode output channel. */
   log(event: string, data?: Record<string, unknown>): void {
+    if (event === 'bridge.connection-status') {
+      this.state.connection = data
+      return
+    }
     if (event === 'shell.shell-heartbeat') {
       this.state.lastHeartbeatAt = new Date().toISOString()
       return
     }
-    const row = { time: new Date().toISOString(), event, ...(data === undefined ? {} : { data }) }
+    if (event === 'runtime.starting') this.state.runtimeId = data?.runtimeId
+    const row = { time: new Date().toISOString(), hostPid: process.pid, workspace: this.state.workspace, runtimeId: this.state.runtimeId, event, ...(data === undefined ? {} : { data }) }
     this.events.push(row)
     if (this.events.length > 200) this.events.shift()
     this.state.lastEvent = row
@@ -883,7 +900,11 @@ function shellHtml(webview: vscode.Webview, body: string, script: string): strin
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: transparent; }
-  iframe { display: block; width: 100%; height: 100%; border: 0; }
+  body:has(#connection-status) { display: flex; flex-direction: column; }
+  #connection-status { flex: 0 0 auto; padding: 8px; color: var(--vscode-foreground); background: var(--vscode-editorWidget-background); font: 12px/1.5 var(--vscode-font-family, system-ui); border-bottom: 1px solid var(--vscode-widget-border); }
+  #connection-status[hidden] { display: none; }
+  #connection-status button { margin: 4px 6px 0 0; }
+  iframe { flex: 1 1 auto; min-height: 0; display: block; width: 100%; height: 100%; border: 0; }
   .status { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 24px; font: 13px/1.5 var(--vscode-font-family, system-ui); color: var(--vscode-foreground); text-align: center; }
   .startup-error { display: block; overflow: auto; text-align: left; user-select: text; overflow-wrap: anywhere; }
   .startup-error h1 { font-size: 16px; }
@@ -914,6 +935,11 @@ function redactUrl(value: string): string {
 
 /** Sidebar view provider: iframe shell plus iframe↔extension message relay. */
 class DshWebviewProvider implements vscode.WebviewViewProvider {
+  private pageId = ''
+  private repair: Promise<string> | undefined
+  private repairOrigin: string | undefined
+  private lastConnectionFacts = ''
+  private selectedSessionId: string | undefined
   private view: vscode.WebviewView | undefined
   private bridgeReady = false
   private pendingRefs: ResolvedReference[] = []
@@ -935,6 +961,7 @@ class DshWebviewProvider implements vscode.WebviewViewProvider {
       theme: themeFor(),
       ...(this.folder === undefined ? {} : { cwd: this.folder.uri.fsPath, title: this.folder.name }),
     })
+    if (this.selectedSessionId !== undefined) this.post({ type: 'open-session', sessionId: this.selectedSessionId })
     this.flushPendingRefs()
   }
 
@@ -985,6 +1012,37 @@ class DshWebviewProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (message: unknown) => {
       if (typeof message !== 'object' || message === null) return
       const action = message as BridgeEnvelope
+      if (action.pageId !== undefined && action.pageId !== this.pageId) return
+      if (action.source === 'dsh-vscode-bridge' && action.type === 'history-state' && typeof action.sessionId === 'string') this.selectedSessionId = action.sessionId
+      if (action.source === 'dsh-vscode-shell' && action.type === 'host-ping') {
+        this.post({ type: 'host-pong', sentAt: action.sentAt, pageId: this.pageId })
+        return
+      }
+      if ((action.source === 'dsh-vscode-shell' || action.source === 'dsh-vscode-bridge') && action.type === 'repair-forwarding') {
+        const pageId = this.pageId
+        try {
+          const url = await this.repairForwarding()
+          if (pageId === this.pageId) this.post({ type: 'forwarding-result', requestId: action.requestId, url, pageId })
+        } catch (error) {
+          this.telemetry('webview.forwarding-failed', { pageId, message: String(error) })
+          if (pageId === this.pageId) this.post({ type: 'forwarding-result', requestId: action.requestId, pageId, message: String(error) })
+        }
+        return
+      }
+      if (action.source === 'dsh-vscode-shell' && action.type === 'reload-page') {
+        this.refreshPage()
+        return
+      }
+      if (action.source === 'dsh-vscode-bridge' && action.type === 'connection-status') {
+        const { type: _type, source: _source, ...health } = action
+        this.telemetry('bridge.connection-status', health)
+        const facts = JSON.stringify([action.connection, action.history, health.proxy, health.backend, health.stalled, health.exhausted])
+        if (facts !== this.lastConnectionFacts) {
+          this.lastConnectionFacts = facts
+          this.telemetry('webview.connection-changed', health)
+        }
+        return
+      }
       if (action.source === 'dsh-vscode-startup-error') {
         if (this.view !== view || this.startupError === undefined) return
         switch (action.type) {
@@ -1009,18 +1067,54 @@ class DshWebviewProvider implements vscode.WebviewViewProvider {
       }
       this.onBridgeMessage(message as BridgeEnvelope)
     })
+    view.onDidDispose(() => { if (this.view === view) { this.view = undefined; this.pageId = nonce() } })
     this.reload()
   }
 
   /** Post one host message through the outer relay into the iframe. */
   post(message: unknown): void {
     if (this.view === undefined) return
-    void this.view.webview.postMessage({ __dshHost: true, source: 'dsh-vscode-host', ...(message as Record<string, unknown>) })
+    void this.view.webview.postMessage({ __dshHost: true, source: 'dsh-vscode-host', pageId: this.pageId, ...(message as Record<string, unknown>) })
+  }
+
+  /** Reload only the frontend; an existing runtime and its tasks remain owned by this EH. */
+  refreshPage(): void {
+    this.telemetry('command.refresh-page')
+    this.reload()
+  }
+
+  /** Ask the retained page and its forwarded endpoint to reconnect. */
+  reconnectPage(): void {
+    const pageId = this.pageId
+    this.post({ type: 'reconnect-page' })
+    void this.repairForwarding().then(url => {
+      if (pageId === this.pageId) this.post({ type: 'forwarding-result', url, pageId })
+    }, error => { this.telemetry('webview.forwarding-failed', { pageId, message: String(error) }) })
+  }
+
+  /** Re-establish forwarding without replacing the page or the DSH process. */
+  private repairForwarding(origin = this.runtime?.origin): Promise<string> {
+    if (this.repair !== undefined && this.repairOrigin === origin) return this.repair
+    if (origin === undefined) return Promise.reject(new Error('DSH runtime is not ready'))
+    const operation = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => { reject(new Error('Port forwarding timed out')) }, 8000)
+      void Promise.resolve(vscode.env.asExternalUri(vscode.Uri.parse(origin))).then(uri => {
+        clearTimeout(timer)
+        resolve(uri.toString())
+      }, error => { clearTimeout(timer); reject(error) })
+    })
+    const repair = operation.finally(() => { if (this.repair === repair) this.repair = undefined })
+    this.repair = repair
+    this.repairOrigin = origin
+    this.telemetry('webview.repair-forwarding', { pageId: this.pageId })
+    return repair
   }
 
   private reload(): void {
     const view = this.view
     if (view === undefined) return
+    const pageId = nonce()
+    this.pageId = pageId
     this.startupError = undefined
     this.bridgeReady = false
     if (this.runtime === undefined || this.folder === undefined) {
@@ -1031,6 +1125,7 @@ class DshWebviewProvider implements vscode.WebviewViewProvider {
     view.webview.html = shellHtml(view.webview, '<div class="status">Starting DSH Sidebar…</div>', '')
     const folder = this.folder
     void this.runtime.getWebUrl().then(async (url) => {
+      if (this.view !== view || this.pageId !== pageId) return
       const proxy = new URL(url)
       const proxyPort = Number(proxy.port)
       view.webview.options = {
@@ -1040,68 +1135,26 @@ class DshWebviewProvider implements vscode.WebviewViewProvider {
       // asExternalUri is what establishes (or reuses) the client-side port
       // forwarding tunnel; webview portMapping would intercept fetch but not
       // cross-origin iframe navigation.
-      let embedded = url
-      try {
-        const external = await vscode.env.asExternalUri(vscode.Uri.parse(proxy.origin))
-        if (external.authority !== '') {
-          const forwarded = new URL(url)
-          forwarded.protocol = external.scheme
-          forwarded.host = external.authority
-          embedded = forwarded.href
-        }
-      } catch (error) {
-        this.telemetry('webview.external-uri-error', { message: String(error) })
-      }
+      const forwarded = new URL(url)
+      const external = new URL(await this.repairForwarding(proxy.origin))
+      forwarded.protocol = external.protocol
+      forwarded.host = external.host
+      const embedded = forwarded.href
       this.telemetry('webview.origin', {
         proxy: redactUrl(url),
         embedded: redactUrl(embedded),
         mode: 'external-uri-forward',
         proxyPort,
       })
-      if (this.view !== view) return
-      const body = `<iframe id="frame" src="${escapeAttribute(embedded)}" allow="clipboard-read; clipboard-write"></iframe>`
-      const script = `(() => {
-  const vscode = acquireVsCodeApi();
-  const post = (message) => vscode.postMessage(Object.assign({ source: 'dsh-vscode-shell' }, message));
-  window.addEventListener('error', (event) => post({ type: 'shell-error', message: String(event.message || event.error || 'unknown') }));
-  window.addEventListener('unhandledrejection', (event) => post({ type: 'shell-rejection', message: String(event.reason || 'unknown') }));
-  const frame = document.getElementById('frame');
-  let bridgeSeen = false;
-  let retries = 0;
-  const retryTimer = setInterval(() => {
-    if (bridgeSeen) { clearInterval(retryTimer); return; }
-    if (retries >= 3) { clearInterval(retryTimer); post({ type: 'shell-bridge-timeout' }); return; }
-    retries += 1;
-    post({ type: 'shell-retry', retries });
-    if (frame && frame.src) frame.src = frame.src + (frame.src.indexOf('?') === -1 ? '?' : '&') + 'r=' + String(Date.now());
-    const health = frame && frame.src ? new URL('/__dsh_vscode_health', frame.src).href : '';
-    if (health) fetch(health, { mode: 'no-cors' }).then(() => post({ type: 'shell-health-ok' })).catch((error) => post({ type: 'shell-health-error', message: String(error) }));
-  }, 8000);
-  window.addEventListener('message', (event) => {
-    if (!frame || event.source !== frame.contentWindow) return;
-    if (event.data && event.data.source === 'dsh-vscode-bridge' && event.data.type === 'bridge-loaded') {
-      if (!bridgeSeen) post({ type: 'shell-bridge-seen' });
-      bridgeSeen = true;
-    }
-    vscode.postMessage(event.data);
-  });
-  window.addEventListener('message', (event) => {
-    const data = event.data;
-    if (!data || data.__dshHost !== true || !frame || !frame.contentWindow) return;
-    frame.contentWindow.postMessage(data, '*');
-  });
-  frame.addEventListener('load', () => post({ type: 'iframe-load', src: frame.src }));
-  frame.addEventListener('error', () => post({ type: 'iframe-error', src: frame.src }));
-  post({ type: 'shell-ready', src: frame.src });
-  window.addEventListener('dragenter', (event) => post({ type: 'shell-drag-enter', types: Array.from((event.dataTransfer && event.dataTransfer.types) || []) }));
-  window.addEventListener('drop', (event) => post({ type: 'shell-drop', types: Array.from((event.dataTransfer && event.dataTransfer.types) || []) }));
-  setInterval(() => post({ type: 'shell-heartbeat', src: frame.src, text: document.body.innerText.slice(0, 400) }), 3000);
-})();`
+      if (this.view !== view || this.pageId !== pageId) return
+      const body = `<div id="connection-status" role="status" aria-live="polite" hidden><div id="connection-label"></div><button id="connection-retry" type="button"></button><button id="connection-reload" type="button"></button></div><iframe id="frame" src="${escapeAttribute(embedded)}" allow="clipboard-read; clipboard-write"></iframe>`
+      const shellConfig = JSON.stringify({ pageId, locale: vscode.env.language }).replaceAll('<', '\\u003c')
+      const script = `globalThis.__DSH_SHELL_CONFIG__ = ${shellConfig};\n${readFileSync(path.join(this.context.extensionUri.fsPath, 'dist', 'recovery-shell.js'), 'utf8')}`
       view.webview.html = shellHtml(view.webview, body, script)
       this.telemetry('webview.html-set', { src: redactUrl(embedded) })
       this.post({ type: 'configure', cwd: folder.uri.fsPath, title: folder.name })
-    }, (error: unknown) => {
-      if (this.view !== view) return
+    }).catch((error: unknown) => {
+      if (this.view !== view || this.pageId !== pageId) return
       const message = error instanceof Error ? error.message : String(error)
       this.startupError = message
       this.telemetry('webview.start-failed', { message })
@@ -1247,6 +1300,9 @@ function handleBridgeMessage(
   if (message.source === 'dsh-vscode-shell') {
     telemetry(`shell.${message.type ?? 'unknown'}`, {
       ...(message.types === undefined ? {} : { types: [...message.types] }),
+      ...(message.health === undefined ? {} : { health: message.health }),
+      ...(message.message === undefined ? {} : { message: message.message }),
+      pageId: message.pageId,
     })
     if (message.type === 'shell-ready') onShellReady()
     return
@@ -1265,6 +1321,7 @@ function handleBridgeMessage(
       ? { text: message.text.slice(0, 80) }
       : {}
   telemetry(`bridge.${message.type}`, {
+    pageId: message.pageId, sessionId: message.sessionId, history: message.history, connection: message.connection, elapsedMs: message.elapsedMs,
     ...(typeof message.path === 'string' ? { path: message.path } : {}),
     ...(typeof message.requestType === 'string' ? { requestType: message.requestType } : {}),
     ...(message.types === undefined ? {} : { types: [...message.types] }),
@@ -1280,6 +1337,11 @@ function handleBridgeMessage(
     ...(message.mentions === undefined ? {} : { mentions: [...message.mentions].slice(0, 8) }),
   })
   switch (message.type) {
+    case 'history-state':
+    case 'data-connection-state':
+    case 'connection-reconnect':
+    case 'open-session-received':
+      return
     case 'bridge-loaded':
       output.appendLine('[bridge] loaded')
       onShellReady()
@@ -1877,6 +1939,8 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.commands.executeCommand('workbench.view.extension.dsh-embed')
       void vscode.commands.executeCommand('dsh.embed.view.focus')
     }),
+    vscode.commands.registerCommand('dsh.embed.refreshPage', () => { provider.refreshPage() }),
+    vscode.commands.registerCommand('dsh.embed.reconnect', () => { provider.reconnectPage() }),
     vscode.commands.registerCommand('dsh.embed.restart', async () => {
       if (runtime === undefined) {
         void vscode.window.showWarningMessage('DSH Sidebar: open a workspace folder first.')

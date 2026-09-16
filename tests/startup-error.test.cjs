@@ -32,9 +32,10 @@ function fixture(outcomes, { clipboardFails = false } = {}) {
     TreeItem: class {},
     Uri: {
       joinPath: (uri, leaf) => ({ fsPath: path.join(uri.fsPath, leaf) }),
-      parse: value => ({ scheme: new URL(value).protocol.slice(0, -1), authority: new URL(value).host }),
+      parse: value => ({ scheme: new URL(value).protocol.slice(0, -1), authority: new URL(value).host, toString: () => value }),
     },
     env: {
+      language: 'en',
       clipboard: { writeText: async text => {
         if (clipboardFails) throw new Error('clipboard unavailable')
         copied.push(text)
@@ -56,14 +57,14 @@ function fixture(outcomes, { clipboardFails = false } = {}) {
       return value instanceof Error ? Promise.reject(value) : Promise.resolve(value)
     },
   }
-  const view = { webview: {
+  const view = { onDidDispose() {}, webview: {
     cspSource: 'vscode-webview:',
     onDidReceiveMessage: callback => { receive = callback },
     postMessage: async () => {},
   } }
   const output = { appendLine: line => logs.push(line), show: preserveFocus => shown.push(preserveFocus) }
   const provider = new DshWebviewProvider(
-    { extensionUri: { fsPath: '/extension' }, subscriptions: [] },
+    { extensionUri: { fsPath: path.resolve(__dirname, '..') }, subscriptions: [] },
     runtime,
     { uri: { fsPath: '/workspace' }, name: 'workspace' },
     () => {},

@@ -2,6 +2,7 @@
  * Extension Host lifecycle: own a guardian, authenticate its DSH backend, and
  * publish a window-local bridge proxy only after the complete generation is ready.
  */
+import { randomUUID } from 'node:crypto'
 import { fork, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { Server } from 'node:net'
@@ -199,10 +200,11 @@ export class DshRuntime implements vscode.Disposable {
   }
 
   private async launch(generation: Generation): Promise<string> {
+    const runtimeId = randomUUID()
     const cwd = canonicalPath(this.folder.uri.fsPath)
     const spec = commandFor(this.folder, stableBackendPort(cwd))
     const env = { ...process.env, DSH_EMBED: '1', NO_COLOR: process.env.NO_COLOR ?? '1' }
-    this.telemetry('runtime.starting', { command: spec.command, args: [...spec.args], cwd, hostPid: process.pid })
+    this.telemetry('runtime.starting', { command: spec.command, args: [...spec.args], cwd, hostPid: process.pid, runtimeId })
     const startUrl = await this.startGuardian(generation, { ...spec, cwd, env })
     generation.abort.signal.throwIfAborted()
     const authCookie = await exchangeAuthCookie(startUrl, generation.abort.signal)
@@ -212,7 +214,7 @@ export class DshRuntime implements vscode.Disposable {
     const proxy = new DshBridgeProxy(backend.origin,
       readFileSync(path.join(this.context.extensionUri.fsPath, 'dist', 'bridge.js'), 'utf8'), {
         cwd: this.folder.uri.fsPath, canonicalCwd: cwd, title: this.folder.name,
-        theme: this.getTheme(), locale: vscode.env.language,
+        theme: this.getTheme(), locale: vscode.env.language, runtimeId,
       }, authCookie)
     generation.proxy = proxy
     const port = await proxy.listen(EMBED_PROXY_PORT)

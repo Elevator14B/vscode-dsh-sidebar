@@ -106,6 +106,11 @@
       post({ type: 'configure-ack' })
       return
     }
+    if (recovery !== null) recovery.handle(data)
+    if (data.type === 'new-session' && recovery !== null && !recovery.connected()) {
+      post({ type: 'new-session-error', message: 'DSH is reconnecting. Retry after the connection is restored.' })
+      return
+    }
     if (data.type === 'new-session') {
       pendingNewSessions += 1
       flushNewSessions()
@@ -117,7 +122,10 @@
       return
     }
     if (data.type === 'open-session' && typeof data.sessionId === 'string') {
-      pendingOpens.push(data.sessionId)
+      pendingOpens = [data.sessionId]
+      pendingOpenAt = Date.now()
+      if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer)
+      pendingOpenTimer = setTimeout(function () { pendingOpenTimer = null; flushOpens() }, 15000)
       flushOpens()
       return
     }
@@ -458,19 +466,32 @@
     }, delay || PIN_RETRY_MS)
   }
 
+  var recovery = null
   var pendingOpens = []
+  var pendingOpenAt = 0
+  var pendingOpenTimer = null
   function flushOpens() {
-    if (state.services === null || !state.services.sessions) return
-    for (var i = 0; i < pendingOpens.length; i++) {
-      var id = pendingOpens[i]
-      try {
-        state.services.sessions.open(id)
-        post({ type: 'open-session-ack', sessionId: id })
-      } catch (error) {
-        post({ type: 'open-session-error', sessionId: id, message: String(error) })
-      }
+    if (pinInFlight || state.services === null || !state.services.sessions || (recovery !== null && !recovery.connected())) return
+    if (state.services.sessions.list.getSnapshot().phase !== 'ready' || pendingOpens.length === 0) return
+    if (state.services.workspaces.list.getSnapshot().phase !== 'ready') return
+    var id = pendingOpens[pendingOpens.length - 1]
+    if (state.services.sessions.list.getSnapshot().byId[id] === undefined) {
+      if (Date.now() - pendingOpenAt < 15000) return
+      pendingOpens = []
+      post({ type: 'open-session-error', sessionId: id, message: 'Session did not appear in the refreshed catalog. Reconnect and retry.' })
+      return
     }
+    if (pendingOpenTimer !== null) { clearTimeout(pendingOpenTimer); pendingOpenTimer = null }
+    // Opening synchronously publishes a new selection; detach the pending
+    // request before subscribers can re-enter this function.
     pendingOpens = []
+    try {
+      if (!sessionInScope(id)) throw outOfScope('session', id)
+      state.services.sessions.open(id)
+      post({ type: 'open-session-received', sessionId: id })
+    } catch (error) {
+      post({ type: 'open-session-error', sessionId: id, message: String(error) })
+    }
   }
 
   var pendingNewSessions = 0
@@ -1880,6 +1901,7 @@
             console.warn('[dsh-vscode] workspace create failed:', error)
           }).finally(function () {
             pinInFlight = false
+            flushOpens()
             schedulePinCheck()
           })
           return
@@ -1893,6 +1915,7 @@
           console.warn('[dsh-vscode] workspace auto-pin failed:', error)
         }).finally(function () {
           pinInFlight = false
+          flushOpens()
           schedulePinCheck()
         })
       }
@@ -1909,6 +1932,19 @@
             conversation: ctx.get('conversation'),
             theme: ctx.get('theme'),
           }
+          ctx.inject(['connection'], function (connectedCtx) {
+            var connection = connectedCtx.get('connection')
+            if (!connection) return
+            connectedCtx.effect(function () {
+              var installed = globalThis.__DSH_INSTALL_RECOVERY__({
+                connection: connection, sessions: state.services.sessions,
+              }, post, config)
+              recovery = installed
+              var off = connection.state.subscribe(flushOpens)
+              flushOpens()
+              return function () { off(); installed.dispose(); if (recovery === installed) recovery = null }
+            }, 'vscode-embed-bridge: connection recovery')
+          })
           // The page is a profile-wide client: its own boot navigation picks the
           // most recently used Workspace, the sidebar lists every Workspace, and
           // opening a Session activates its writer (a cross-process write lease).
@@ -2066,17 +2102,22 @@
             var sessions = ctx.get('sessions')
             if (!sessions) return function () {}
             var sync = function () {
+              flushOpens()
               resolveInput()
               insertQueuedRefs()
             }
             var unsubscribe = sessions.list.subscribe(sync)
             sync()
-            return function () { unsubscribe() }
+            return function () {
+              unsubscribe()
+              if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer)
+              pendingOpenTimer = null
+            }
           }, 'vscode-embed-bridge: session input sync')
           ctx.effect(function () {
             var workspaces = ctx.get('workspaces')
             if (!workspaces) return function () {}
-            var sync = publishWorkspaceState
+            var sync = function () { flushOpens(); publishWorkspaceState() }
             var unsubscribe = workspaces.list.subscribe(sync)
             sync()
             return function () { unsubscribe() }

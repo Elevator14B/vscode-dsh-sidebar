@@ -44,6 +44,8 @@ jobs:
       - name: Install the DeepSeek Harness CLI
         run: npm install -g @deepseek-ai/dsh@0.1.5-rc.2
       - run: npm run smoke
+      - run: npx playwright install --with-deps chromium
+      - run: npm run smoke:recovery
 
   contract-latest:
     name: contract smoke against dsh latest (informational)
