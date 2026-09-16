@@ -258,6 +258,7 @@ assert.ok(provider, 'activate registered the webview provider')
 const posts = []
 let receive
 const view = {
+  onDidDispose() {},
   webview: {
     cspSource: 'vscode-webview:',
     onDidReceiveMessage(callback) { receive = callback },

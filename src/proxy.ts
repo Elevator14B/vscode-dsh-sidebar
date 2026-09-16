@@ -24,6 +24,8 @@ export interface BridgeConfig {
   readonly theme: 'light' | 'dark'
   /** VS Code display language (`vscode.env.language`), for bridge-owned chrome. */
   readonly locale: string
+  /** Identity checked by the page after remote forwarding reconnects. */
+  readonly runtimeId?: string
 }
 
 const HOP_BY_HOP = new Set([
@@ -161,8 +163,8 @@ export class DshBridgeProxy {
       return
     }
     if (pathname === '/__dsh_vscode_health') {
-      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
-      res.end('ok')
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ protocol: 'dsh-sidebar-health-v1', runtimeId: this.config.runtimeId }))
       return
     }
 

@@ -73,3 +73,15 @@ test('the injected cookie is what upstream sees for a page request too', async (
     await new Promise((resolve) => { backend.server.close(resolve) })
   }
 })
+
+
+test('proxy health identifies the runtime without exposing its authentication cookie', async () => {
+  const proxy = new DshBridgeProxy('http://127.0.0.1:1', '', { ...CONFIG, runtimeId: 'runtime-test' }, COOKIE)
+  try {
+    const port = await proxy.listen(0)
+    const response = await fetch('http://127.0.0.1:' + port + '/__dsh_vscode_health')
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(await response.json(), { protocol: 'dsh-sidebar-health-v1', runtimeId: 'runtime-test' })
+    assert.deepEqual(response.headers.getSetCookie(), [])
+  } finally { await proxy.close() }
+})

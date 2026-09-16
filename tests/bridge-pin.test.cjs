@@ -47,7 +47,8 @@ globalThis.document = {
   head: { appendChild() {} },
   body: { toggleAttribute() {}, innerText: '' },
 }
-globalThis.window = { addEventListener() {} }
+const messageListeners = []
+globalThis.window = { addEventListener(type, fn) { if (type === 'message') messageListeners.push(fn) } }
 const loadedRows = []
 globalThis.__ModuleLoader__ = { load: (row) => { loadedRows.push(row) } }
 globalThis.__DSH_BOOT__ = { entries: [], batches: [{ phase: 'application', entries: [] }] }
@@ -105,12 +106,14 @@ const sessions = {
   clear() { calls.push(['clear']) },
 }
 
+let connectDelay
 const uiWorkspace = {
   async connectWorkspace(workspaceId) {
     calls.push(['connectWorkspace', workspaceId])
     // Reality: the app reuses/creates a blank session in that workspace and
     // opens it, which moves `current` back inside the pinned folder.
     sessionsList.set({ ...sessionsList.getSnapshot(), current: ROOT })
+    if (connectDelay) await connectDelay
     return ROOT
   },
   async archiveSession(sessionId) { calls.push(['archiveSession', sessionId]) },
@@ -205,4 +208,44 @@ test('row facts keep row identity, so membership changes still repaint', async (
   await new Promise((resolve) => { setTimeout(resolve, 250) })
   assert.equal(posted.some(message => message.type === 'sessions-dirty'), true, JSON.stringify(posted))
   workspacesList.set(workspace)
+})
+
+
+test('session clicks wait for catalog readiness and keep only the last selection', async () => {
+  reset()
+  sessionsList.set({ ...sessionsList.getSnapshot(), phase: 'loading', current: ROOT })
+  for (const sessionId of [ROOT, CHILD, GRANDCHILD]) {
+    for (const listener of messageListeners) listener({ data: { source: 'dsh-vscode-host', type: 'open-session', sessionId } })
+  }
+  assert.equal(calls.filter(([kind]) => kind === 'open').length, 0)
+  sessionsList.set({ ...sessionsList.getSnapshot(), phase: 'ready' })
+  await settle()
+  assert.deepEqual(calls.filter(([kind]) => kind === 'open'), [['open', GRANDCHILD]])
+  assert.equal(posted.filter(m => m.type === 'open-session-received').length, 1)
+})
+
+test('a workspace row arriving before its session catalog entry waits instead of failing scope checks', async () => {
+  reset()
+  const id = 'session-new-after-reconnect'
+  for (const listener of messageListeners) listener({ data: { source: 'dsh-vscode-host', type: 'open-session', sessionId: id } })
+  assert.equal(calls.filter(([kind]) => kind === 'open').length, 0)
+  assert.equal(posted.filter(m => m.type === 'scope-blocked' || m.type === 'open-session-error').length, 0)
+  const previous = sessionsList.getSnapshot()
+  sessionsList.set({ ...previous, ids: [...previous.ids, id], byId: { ...previous.byId, [id]: row(id, PIN) } })
+  await settle()
+  assert.deepEqual(calls.filter(([kind]) => kind === 'open'), [['open', id]])
+})
+
+
+test('a restored selection waits for workspace pinning to finish', async () => {
+  reset()
+  let release
+  connectDelay = new Promise(resolve => { release = resolve })
+  setCurrent(FOREIGN)
+  for (const listener of messageListeners) listener({ data: { source: 'dsh-vscode-host', type: 'open-session', sessionId: CHILD } })
+  assert.equal(calls.filter(([kind]) => kind === 'open').length, 0)
+  release()
+  connectDelay = undefined
+  await settle()
+  assert.deepEqual(calls.filter(([kind]) => kind === 'open').at(-1), ['open', CHILD])
 })

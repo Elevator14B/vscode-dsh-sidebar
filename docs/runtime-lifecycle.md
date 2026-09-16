@@ -62,6 +62,20 @@ Window theme, authentication cookies and bridge state remain private to that Hos
 The UI's cleanup wait is bounded at 12 seconds. A process stuck in uninterruptible kernel I/O can outlive
 that wait; its guardian and workspace reservation remain, so a retry cannot start a competing writer.
 
+## Page connection recovery
+
+Page recovery never signals the guardian, changes workspace ownership or retries a prompt. The Agent toolbar refresh reloads only the webview; backend restart remains a separately named command that interrupts running tasks. Reloading a page may discard unsent drafts, so automatic recovery does not replace the iframe.
+
+The local shell sends an Extension Host round trip every three seconds. Ten seconds without a recent matching reply shows an extension-connection warning; delayed buffered replies cannot mark the connection restored. Fresh replies after a gap request forwarding resolution and DSH reconnection. Each page has an identity, and Host handlers reject replies or messages belonging to replaced pages.
+
+The injected bridge subscribes to DSH's public `connection.state` and the selected Session snapshot. History loading for 15 seconds displays a timeout independently of the connection's reported state. An unhealthy episode first requests `connection.reconnect()`, then requests forwarding resolution and another reconnect. Automatic attempts are bounded at two, at least ten seconds apart. Restored data/history readiness clears the episode. Manual reconnect can start another attempt.
+
+A same-origin health request checks the proxy protocol and runtime identity every twelve seconds at the three-second tick cadence, with a four-second deadline. During recovery the same bounded probe also reads `session/list` to distinguish proxy reachability from backend response. Forwarding resolution uses `asExternalUri`, coalesces concurrent calls for the same origin and times out after eight seconds. This asks VS Code to establish or reuse a tunnel; the extension cannot force an unhealthy SSH transport to recover. A changed forwarded origin asks the user to reload the page.
+
+The shell shows recovery actions when a page does not report bridge health, the data connection is down or history is slow. Selecting several sessions in a reconnect burst opens only the last selection; selections received while DSH is disconnected remain coalesced until its connection returns. New-session requests while disconnected report an error instead of accumulating creation operations. Prompt admission remains DSH-owned: recovery does not resend messages, and the disconnected banner asks users to check history before resending an unconfirmed submission.
+
+`history-state` records loading, open and error states separately from `open-session-received`. Trace rows carry Host PID, workspace and runtime identity; page messages carry page identity and session events include the session id. Periodic connection snapshots and shell heartbeats update memory, while changes enter the trace. These are UI health signals, never backend ownership signals.
+
 ## Scope and migration
 
 The real process/lock regression suite targets Linux Remote SSH. macOS uses POSIX group cleanup;
@@ -81,6 +95,8 @@ and verifies release of a real flock held by an observed detached descendant. `r
 exercises the actual packaged guardian through `DshRuntime`, including authentication failure, cancellation,
 concurrent restart and guardian crash. `proxy-lifecycle.test.cjs` holds real WebSocket and HTTP connections
 open during teardown. `npm run smoke` exercises the installed DSH CLI through the guardian and proxy.
+
+`connection-recovery.test.cjs` exercises deadlines, bounded recovery, stale proxy identities, obsolete session observers, EH reply freshness and buffered selections with a controlled clock. `webview-recovery.test.cjs` tests page generations, concurrent forwarding and delayed replies. `npm run smoke:recovery` uses the installed DSH and Playwright Chromium to disconnect the data channel and delay history while checking that one backend generation survives; run `npx playwright install chromium` first. `DSH_CHROMIUM_PATH` optionally selects an existing browser.
 
 Actual Remote SSH disconnect/reconnect and Extension Host replacement remain editor acceptance checks;
 the process tests do not claim to reproduce VS Code's transport implementation.

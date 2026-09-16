@@ -2,7 +2,7 @@
   "name": "dsh-sidebar",
   "displayName": "DSH Sidebar",
   "description": "VS Code sidebar for DeepSeek Harness: native session tree, file and diff navigation, drag-to-reference, clipboard and theme bridges.",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "publisher": "Elevator14B",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -62,10 +62,21 @@
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "dsh.embed.restart",
-        "title": "Restart Agent Runtime",
+        "command": "dsh.embed.refreshPage",
+        "title": "Reload Agent Page",
         "category": "DSH Sidebar",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "dsh.embed.reconnect",
+        "title": "Reconnect Agent",
+        "category": "DSH Sidebar"
+      },
+      {
+        "command": "dsh.embed.restart",
+        "title": "Restart Agent Runtime (Interrupts Running Tasks)",
+        "category": "DSH Sidebar",
+        "icon": "$(debug-restart)"
       },
       {
         "command": "dsh.embed.referenceSelection",
@@ -193,7 +204,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "dsh.embed.restart",
+          "command": "dsh.embed.refreshPage",
           "when": "view == dsh.embed.view",
           "group": "navigation@1"
         }
@@ -245,13 +256,16 @@
     "test": "node --test tests/*.test.cjs",
     "smoke": "node scripts/smoke.js",
     "typecheck": "tsc --noEmit",
-    "presmoke": "node esbuild.mjs"
+    "presmoke": "node esbuild.mjs",
+    "presmoke:recovery": "node esbuild.mjs",
+    "smoke:recovery": "node scripts/smoke-recovery.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.96.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "^0.25.0",
+    "playwright": "1.61.1",
     "typescript": "^5.7.2"
   }
 }

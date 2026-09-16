@@ -101,7 +101,7 @@ probes the CLI version at startup (`src/dsh-version.ts`) and refuses to boot on 
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
-| 0.3.13 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Extension Host ownership and process guardian; Linux lifecycle tested. |
+| 0.3.14 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Extension Host ownership, page connection recovery and history timeout feedback. |
 | 0.3.12 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
 | 0.3.11 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | First public release on GitHub. |
 
@@ -121,7 +121,9 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 ## Commands
 
 - **DSH Sidebar: Open Agent**
-- **DSH Sidebar: Restart Agent Runtime**
+- **DSH Sidebar: Reload Agent Page** (Agent title bar refresh; keeps the backend running, but unsent page drafts may be lost)
+- **DSH Sidebar: Reconnect Agent** (repairs the connection without replacing the page)
+- **DSH Sidebar: Restart Agent Runtime (Interrupts Running Tasks)** (Command Palette)
 - **New Session** / **Refresh Sessions** (Sessions tree title bar)
 - **Move Session Up** / **Move Session Down** / **Archive Session** (session row context menu; dragging one row
   onto another reorders directly)
@@ -175,8 +177,11 @@ version-gate verdict.
   (`npm install -g @deepseek-ai/dsh`), then reload the window.
 - **"failed to start dsh"** — `dsh` is not on the extension host's `PATH`. Use `dsh.embed.command` for an
   explicit path, or install it globally on the machine that hosts the folder.
+- **History stays at “Loading history…” after reconnect** — the connection banner distinguishes remote extension communication, port forwarding and DSH data readiness. It offers **Reconnect** and **Reload page** after bounded automatic recovery. History taking more than 15 seconds displays a timeout; it does not kill the agent. Check history before resending an unconfirmed message.
 - **Diagnostics** — each window writes a JSONL trace to `~/.dsh/vscode-embed/telemetry.jsonl` and publishes
-  `current.json` next to it; the port in that file answers `/status`, `/logs`, `/ping` and `/restart` on loopback.
+  `current.json` next to it (the most recently activated window); trace rows include Host PID, workspace and runtime identity, while page events carry their page identity. The port in that file answers `/status`, `/logs`, `/ping` and `/restart` on loopback.
+
+The `/status` response also includes the latest page connection and history state. Periodic heartbeats stay in memory; only status changes enter the trace. See [page recovery](docs/runtime-lifecycle.md#page-connection-recovery) for timings and verification.
 
 ## Privacy
 

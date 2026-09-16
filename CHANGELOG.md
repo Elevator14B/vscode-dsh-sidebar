@@ -3,6 +3,20 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## 0.3.14
+
+### Changed
+
+- Agent title-bar refresh now reloads the page without restarting DSH. Reconnect and backend restart are separate commands; the restart title names its effect on running tasks.
+- Page recovery observes Extension Host round trips, forwarded proxy identity, DSH connection state and the selected session's history state independently.
+- Automatic recovery requests DSH reconnection and rechecks port forwarding, with bounded attempts. History loading over 15 seconds displays recovery actions. Page replacement stays explicit to preserve drafts.
+- Session-selection bursts are coalesced; disconnected selection retains only the latest request. Recovery never retries message submissions.
+- Telemetry identifies the Host, workspace, runtime and page, and distinguishes selection receipt from completed history loading. Routine health polling does not write trace rows.
+
+### Fixed
+
+- Delayed forwarding and startup responses cannot update a replaced or disposed webview. Forwarding resolution has a deadline and concurrent repair requests share one operation.
+
 ## 0.3.13
 
 ### Changed
