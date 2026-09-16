@@ -208,6 +208,7 @@
     "pretest": "node esbuild.mjs",
     "test": "node --test tests/*.test.cjs",
     "smoke": "node scripts/smoke.js",
+    "check:package": "node scripts/check-package.js",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

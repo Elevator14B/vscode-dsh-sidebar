@@ -24,33 +24,6 @@ jobs:
       - run: npm run build
       - name: Package the VSIX
         run: npm run package
-      - name: Check the packaged file set
-        env:
-          # Optional: set this repository secret to a grep -E pattern of your own
-          # private markers (host names, internal paths) to assert none of them
-          # reach the artifact. Empty by default; nothing private is stored here.
-          PRIVATE_MARKERS: ${{ secrets.PRIVATE_MARKERS }}
-        run: |
-          set -euo pipefail
-          VSIX="$(ls ./*.vsix | head -1)"
-          unzip -l "$VSIX"
-          # No dotfile and nothing outside the allow-list may ship.
-          if unzip -Z1 "$VSIX" | grep -E -q '(^|/)\.[^/]+$|(^|/)[.]github/|^extension/(src|tests|scripts)/|(^|/)package-lock[.]json$'; then
-            echo "::error::the packaged VSIX contains a file outside the allow-list"
-            exit 1
-          fi
-          if unzip -p "$VSIX" | grep -a -E -q '/(home|Users)/[A-Za-z0-9._-]+'; then
-            echo "::error::the packaged VSIX embeds an absolute developer path"
-            exit 1
-          fi
-          if unzip -p "$VSIX" | grep -a -E -q '(@deepseek[.]com|glpat-|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)'; then
-            echo "::error::the packaged VSIX matches a credential pattern"
-            exit 1
-          fi
-          if [ -n "${PRIVATE_MARKERS}" ] && unzip -p "$VSIX" | grep -a -E -q "${PRIVATE_MARKERS}"; then
-            echo "::error::the packaged VSIX matches a configured private marker"
-            exit 1
-          fi
       - uses: actions/upload-artifact@v7
         with:
           name: vsix

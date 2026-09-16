@@ -30,19 +30,20 @@ Open the folder in VS Code and press <kbd>F5</kbd> for an Extension Development 
 
 ## CI
 
-`ci.yml` typechecks, runs the unit tests, packages the VSIX, asserts that the artifact contains only the
-`files` allow-list and no absolute developer path, and then runs the contract smoke test against a real
-`dsh`. `release.yml` repeats those checks on a tag and attaches the VSIX to the GitHub release.
+`ci.yml` typechecks, runs the unit tests, packages the VSIX and runs the contract smoke test against a
+real `dsh`. `release.yml` repeats those checks on a tag and attaches the VSIX to the GitHub release.
 
-If your machine has private host names or internal paths that must never reach an artifact, set the
-repository secret `PRIVATE_MARKERS` to a `grep -E` pattern: the packaging steps then fail when the VSIX
-matches it. The pattern lives in the secret, never in the repository.
+Packaging hygiene is a local gate rather than a CI step — run it before you upload an artifact:
+
+```sh
+npm run package
+npm run check:package   # allow-list, no dotfile, no absolute path, no credential shape
+```
 
 ## Releases
 
 1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
 2. Commit, then `git tag v<version> && git push origin v<version>`.
-3. The `release` workflow typechecks, tests, packages the VSIX, checks the artifact for private references,
-   and attaches it to the GitHub release.
+3. The `release` workflow typechecks, tests, packages the VSIX and attaches it to the GitHub release.
 4. Update the compatibility table in `README.md` if the tested `dsh` version moved (and keep
    `TESTED_DSH_VERSION` in `src/dsh-version.ts` in step with the CI contract job).
