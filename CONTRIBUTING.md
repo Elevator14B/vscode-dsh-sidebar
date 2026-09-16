@@ -33,13 +33,6 @@ Open the folder in VS Code and press <kbd>F5</kbd> for an Extension Development 
 `ci.yml` typechecks, runs the unit tests, packages the VSIX and runs the contract smoke test against a
 real `dsh`. `release.yml` repeats those checks on a tag and attaches the VSIX to the GitHub release.
 
-Packaging hygiene is a local gate rather than a CI step — run it before you upload an artifact:
-
-```sh
-npm run package
-npm run check:package   # allow-list, no dotfile, no absolute path, no credential shape
-```
-
 ## Releases
 
 1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
