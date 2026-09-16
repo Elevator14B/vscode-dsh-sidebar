@@ -144,6 +144,10 @@ class Telemetry {
 
   /** Append one structured event and mirror it into the VSCode output channel. */
   log(event: string, data?: Record<string, unknown>): void {
+    if (event === 'shell.shell-heartbeat') {
+      this.state.lastHeartbeatAt = new Date().toISOString()
+      return
+    }
     const row = { time: new Date().toISOString(), event, ...(data === undefined ? {} : { data }) }
     this.events.push(row)
     if (this.events.length > 200) this.events.shift()
@@ -1681,6 +1685,8 @@ class SessionOrderController implements vscode.TreeDragAndDropController<Session
   }
 }
 
+let activeRuntime: DshRuntime | undefined
+
 /** Activate the embedded web runtime and native command surface. */
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('DSH Sidebar')
@@ -1690,7 +1696,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let runtime: DshRuntime | undefined
   const telemetry = new Telemetry(output, () => {
     output.appendLine('[runtime] telemetry-triggered restart')
-    void runtime?.restart()
+    void runtime?.restart().catch(error => { output.appendLine(`[runtime] restart failed: ${String(error)}`) })
   })
   telemetry.set('workspace', folder?.uri.fsPath ?? null)
   telemetry.set('extensionVersion', String(context.extension.packageJSON.version ?? '0.0.0'))
@@ -1710,6 +1716,7 @@ export function activate(context: vscode.ExtensionContext): void {
       (event, data) => { telemetry.log(event, data) },
       themeFor,
     )
+  activeRuntime = runtime
   if (runtime !== undefined) {
     // The open window is the trigger, not the first reveal of the view: the
     // pinned folder is already known here, and the backend takes seconds to
@@ -1786,7 +1793,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     output,
     telemetry,
-    runtime ?? { dispose: (): void => {} },
+    { dispose: (): void => { void runtime?.dispose().catch(error => { console.error('DSH runtime cleanup failed', error) }) } },
     sessions ?? { dispose: (): void => {} },
     status,
     vscode.workspace.registerTextDocumentContentProvider('dsh-git', gitHeads),
@@ -1929,5 +1936,9 @@ export function activate(context: vscode.ExtensionContext): void {
   )
 }
 
-/** Deactivate does not need extra cleanup: all disposables ride context subscriptions. */
-export function deactivate(): void {}
+/** Normal shutdown awaits cleanup; IPC EOF covers abrupt Extension Host death. */
+export async function deactivate(): Promise<void> {
+  const runtime = activeRuntime
+  activeRuntime = undefined
+  await runtime?.dispose()
+}

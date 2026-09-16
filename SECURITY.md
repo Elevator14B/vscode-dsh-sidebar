@@ -13,8 +13,12 @@ Only the latest released version is supported.
 
 Understanding the design makes reports much easier to triage:
 
-- It spawns the DeepSeek Harness CLI you installed (`dsh web --port <n> --no-open`) as a child process of
-  the extension host, with the open workspace folder as its working directory.
+- It starts a bundled Node guardian over an inherited IPC channel. That guardian spawns the DeepSeek
+  Harness CLI you installed (`dsh web --port <n> --no-open`) with the workspace as its working directory,
+  and stops it when the Extension Host exits. It never uses a browser heartbeat as an ownership signal.
+- It reserves that canonical workspace using a shared loopback listener in ports 44000–59999. This
+  endpoint exposes only the protocol name, workspace hash and owner PID; it accepts no control commands.
+  The Host and guardian retain ownership until backend cleanup completes.
 - It starts a loopback HTTP/WebSocket reverse proxy on `127.0.0.1` that injects the browser-session cookie
   the CLI printed at launch. The cookie is minted and held in the extension host; the sidebar webview never
   receives it.
@@ -38,3 +42,6 @@ Understanding the design makes reports much easier to triage:
   permissions. Read the DeepSeek Harness
   [safety notice](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) before giving an
   agent write access to a repository.
+- The guardian is not a kernel process container. Simultaneously killing both the Host and guardian, or
+  a custom launcher daemonizing before its descendant is observed, can escape portable process cleanup.
+  Linux process death and flock release are tested; macOS and Windows need editor lifecycle validation.

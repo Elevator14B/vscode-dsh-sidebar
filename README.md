@@ -101,6 +101,7 @@ probes the CLI version at startup (`src/dsh-version.ts`) and refuses to boot on 
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
+| 0.3.13 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Extension Host ownership and process guardian; Linux lifecycle tested. |
 | 0.3.12 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
 | 0.3.11 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | First public release on GitHub. |
 
@@ -129,8 +130,12 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 
 ## Architecture
 
-- `src/runtime.ts` — spawns the DSH web runtime with the workspace as `cwd`, gates the CLI version, and
-  exchanges the one-time launch token for the browser-session cookie inside the extension host.
+- `src/runtime.ts` — owns one cancellable backend generation and window proxy, and exchanges the
+  one-time launch token for the browser-session cookie inside the Extension Host.
+- `src/runtime-guardian.ts` — runs the version probe and DSH in a separate process, watches the owning
+  Host's IPC connection, and reaps DSH when that Host exits, including abrupt termination.
+- `src/runtime-ownership.ts` / `src/process-tree.ts` — reserve the workspace until cleanup completes and
+  terminate private process groups plus observed Linux descendants.
 - `src/proxy.ts` — loopback reverse proxy (HTTP + WebSocket) that injects the auth cookie, keeps a stable
   same-origin authority, rewrites the boot theme to the VS Code theme, and serves the injected bridge script.
 - `src/bridge.js` — injected into the page: drains the DSH sidebar from the boot graph, pins the workspace,
@@ -142,6 +147,23 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
   order-planning helpers the drag-and-drop controller uses.
 - `src/dsh-version.ts` — pure semver comparison and the startup gate decision.
 - `src/extension.ts` — webview shell, message relay, file/diff providers and the command surface.
+
+### Runtime lifetime
+
+SSH disconnection keeps DSH running while its **Extension Host** survives. Reconnecting to that Host reuses
+the backend. Replacing or exiting the Host stops its DSH; a new Host starts a new backend and can resume
+persisted conversations, but does not inherit in-flight execution. The longer-lived VS Code Server is
+not the owner. Hiding the sidebar has no effect on the backend.
+
+Only one Sidebar runtime per OS user may own a canonical workspace in the same network namespace at a time.
+A replacement waits for old-process cleanup; another live window on that workspace receives an ownership
+error instead of starting a competing writer. Use the owning window, or close it before retrying.
+
+On first upgrade from 0.3.12, finish or cancel work and stop the old runtime before reloading. Existing
+unguarded processes cannot be adopted automatically. An occupied backend port is reported instead of
+silently choosing a random port. Do not remove `session.lock` files to resolve ownership.
+
+See [runtime lifecycle](docs/runtime-lifecycle.md) for shutdown guarantees, platform limits and tests.
 
 ## Troubleshooting
 

@@ -1,20 +1,18 @@
 /**
- * Per-workspace DSH runtime lifecycle: spawn the source web CLI with the
- * workspace folder as cwd, capture its authenticated URL, and wrap it in the
- * loopback bridge proxy.
+ * Extension Host lifecycle: own a guardian, authenticate its DSH backend, and
+ * publish a window-local bridge proxy only after the complete generation is ready.
  */
-import { execFile, spawn, type ChildProcessByStdio } from 'node:child_process'
+import { fork, type ChildProcess } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
-import type { Readable } from 'node:stream'
+import { Server } from 'node:net'
 import { readFileSync, realpathSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { DshBridgeProxy } from './proxy'
-import { evaluateDshVersion } from './dsh-version'
+import type { GuardianCommand, GuardianEvent, LaunchSpec } from './runtime-protocol'
+import { ProcessTree } from './process-tree'
 
-const START_TIMEOUT_MS = 90_000
-/** How long 'dsh --version' may take before the probe gives up. */
-const VERSION_PROBE_TIMEOUT_MS = 15_000
+const START_TIMEOUT_MS = 150_000
 /** Stable proxy port: VSCode auto-forwarding reuses it across restarts. */
 const EMBED_PROXY_PORT = 39177
 /**
@@ -53,11 +51,6 @@ export function stableBackendPort(canonicalCwd: string): number {
   return BACKEND_PORT_BASE + (hash % BACKEND_PORT_SPAN)
 }
 
-/** Whether one launch failure means the preferred port is already taken. */
-function isAddressInUse(message: string): boolean {
-  return /EADDRINUSE|address already in use/iu.test(message)
-}
-
 function commandFor(folder: vscode.WorkspaceFolder, port: number): CommandSpec {
   const config = vscode.workspace.getConfiguration('dsh.embed', folder.uri)
   const overrideCommand = config.get<string>('command', '').trim()
@@ -71,7 +64,7 @@ function commandFor(folder: vscode.WorkspaceFolder, port: number): CommandSpec {
   }
 }
 
-/** Resolve symlinks/bind mounts the same way the spawned DSH backend will. */
+/** Resolve symlinks the same way the spawned DSH backend will. */
 function canonicalPath(value: string): string {
   try {
     return realpathSync(value)
@@ -89,33 +82,42 @@ function canonicalPath(value: string): string {
  * @param launchUrl - `http://127.0.0.1:<port>/?token=...` printed by dsh web.
  * @returns the cookie payload (`name=value`) or undefined when the exchange failed.
  */
-function exchangeAuthCookie(launchUrl: string): Promise<string | undefined> {
+function exchangeAuthCookie(launchUrl: string, signal: AbortSignal): Promise<string | undefined> {
   return new Promise((resolve, reject) => {
-    const req = httpRequest(launchUrl, { method: 'GET', agent: false }, (res) => {
+    const req = httpRequest(launchUrl, { method: 'GET', agent: false, signal }, (res) => {
       const setCookie = res.headers['set-cookie']
       res.resume()
+      res.on('error', reject)
       res.on('end', () => { resolve(setCookie?.[0]?.split(';', 1)[0]) })
     })
+    const timer = setTimeout(() => { req.destroy(new Error('dsh web auth exchange timed out')) }, 10_000)
+    req.on('close', () => { clearTimeout(timer) })
     req.on('error', reject)
     req.end()
   })
 }
 
-/** Owns one backend and one proxy for one workspace folder. */
+/** One attempt owns every resource until its guardian confirms process exit. */
+interface Generation {
+  readonly abort: AbortController
+  guardian?: ChildProcess
+  ownership?: Server
+  done?: Promise<void>
+  proxy?: DshBridgeProxy
+  url?: string
+  failure?: Error
+}
+
+/** Owns a backend for this Extension Host; callers only share its current generation. */
 export class DshRuntime implements vscode.Disposable {
-  private child: ChildProcessByStdio<null, Readable, Readable> | undefined
-  private proxy: DshBridgeProxy | undefined
-  private webUrl: string | undefined
+  private current: Generation | undefined
   private starting: Promise<string> | undefined
+  private stopping: Promise<void> | undefined
+  private restarting: Promise<void> | undefined
+  private disposed = false
   private readonly change = new vscode.EventEmitter<void>()
-  /** Re-emitted after every successful (re)start. */
   readonly onDidChange = this.change.event
 
-  /**
-   * @param context - Extension context locating packaged bridge/proxy resources.
-   * @param folder - Workspace folder pinned as the DSH working directory.
-   * @param output - Shared extension output channel.
-   */
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly folder: vscode.WorkspaceFolder,
@@ -124,191 +126,185 @@ export class DshRuntime implements vscode.Disposable {
     private readonly getTheme: () => 'light' | 'dark' = () => 'light',
   ) {}
 
-  /** Current proxy origin for in-process API calls; undefined before ready. */
-  get origin(): string | undefined {
-    return this.proxy?.origin ?? (this.webUrl === undefined ? undefined : new URL(this.webUrl).origin)
-  }
+  /** Undefined as soon as stopping or backend failure begins. */
+  get origin(): string | undefined { return this.current?.url }
 
-  /** Current bridge-proxy URL, starting the runtime on first use. */
+  /** Concurrent callers join one startup; a failed generation is reaped before replacement. */
   getWebUrl(): Promise<string> {
-    if (this.webUrl !== undefined && this.child !== undefined && this.child.exitCode === null) {
-      return Promise.resolve(this.webUrl)
-    }
-    if (this.starting === undefined) {
-      this.starting = this.launch().finally(() => { this.starting = undefined })
-    }
-    return this.starting
+    if (this.disposed) return Promise.reject(new Error('DSH runtime is disposed'))
+    if (this.stopping !== undefined) return this.stopping.then(() => this.getWebUrl())
+    if (this.current?.url !== undefined) return Promise.resolve(this.current.url)
+    if (this.starting !== undefined) return this.starting
+    if (this.current !== undefined) return this.stop().then(() => this.getWebUrl())
+    const generation: Generation = { abort: new AbortController() }
+    this.current = generation
+    const starting = this.launch(generation).catch(async (error: unknown) => {
+      generation.abort.abort()
+      await this.cleanup(generation)
+      if (this.current === generation) this.current = undefined
+      throw error
+    }).finally(() => { if (this.starting === starting) this.starting = undefined })
+    this.starting = starting
+    return starting
   }
 
-  /** Kill and relaunch both backend and proxy. */
-  async restart(): Promise<void> {
-    await this.stop()
-    await this.getWebUrl()
-    this.change.fire()
+  /** Concurrent restart requests produce one replacement backend. */
+  restart(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error('DSH runtime is disposed'))
+    if (this.restarting !== undefined) return this.restarting
+    const pending = this.stop().then(async () => {
+      await this.getWebUrl()
+      this.change.fire()
+    }).finally(() => { if (this.restarting === pending) this.restarting = undefined })
+    this.restarting = pending
+    return pending
   }
 
-  /** Stop the backend and proxy; safe when already stopped. */
-  async stop(): Promise<void> {
-    const child = this.child
-    const proxy = this.proxy
-    this.child = undefined
-    this.proxy = undefined
-    this.webUrl = undefined
-    if (child !== undefined && child.exitCode === null) {
-      child.kill('SIGTERM')
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          if (child.exitCode === null) child.kill('SIGKILL')
-          resolve()
-        }, 3000)
-        child.once('exit', () => { clearTimeout(timer); resolve() })
-      })
-    }
-    if (proxy !== undefined) await proxy.close()
+  /** Cancel startup immediately, then wait for sockets and the guardian's process tree. */
+  stop(): Promise<void> {
+    if (this.stopping !== undefined) return this.stopping
+    const generation = this.current
+    if (generation === undefined) return Promise.resolve()
+    generation.url = undefined
+    generation.abort.abort()
+    const starting = this.starting
+    const pending = (async () => {
+      await starting?.catch(() => {}) // The original caller receives the launch failure.
+      await this.cleanup(generation)
+      if (this.current === generation) this.current = undefined
+    })().finally(() => { if (this.stopping === pending) this.stopping = undefined })
+    this.stopping = pending
+    return pending
   }
 
-  /** @inheritdoc */
-  dispose(): void {
-    void this.stop()
+  /** Terminal disposal is awaitable by deactivate; the guardian also handles Host death. */
+  async dispose(): Promise<void> {
+    this.disposed = true
     this.change.dispose()
+    await this.stop()
   }
 
-  private async launch(): Promise<string> {
-    const cwd = this.folder.uri.fsPath
-    const canonicalCwd = canonicalPath(cwd)
-    const env: NodeJS.ProcessEnv = { ...process.env, DSH_EMBED: '1', NO_COLOR: process.env.NO_COLOR ?? '1' }
-    const preferred = stableBackendPort(canonicalCwd)
-    await this.checkVersion(commandFor(this.folder, preferred).command, cwd, env)
-    let startUrl: string
-    try {
-      startUrl = await this.startProcess(commandFor(this.folder, preferred), cwd, canonicalCwd, env)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      // A second window on the same folder (or any other holder) takes the
-      // stable port first; an ephemeral port still serves this launch, at the
-      // cost of a new prompt URL.
-      if (!isAddressInUse(message)) throw error
-      this.output.appendLine(`[runtime] port ${String(preferred)} is in use; falling back to an ephemeral port`)
-      this.telemetry('runtime.port-fallback', { port: preferred })
-      startUrl = await this.startProcess(commandFor(this.folder, 0), cwd, canonicalCwd, env)
+  private async cleanup(generation: Generation): Promise<void> {
+    const guardian = generation.guardian
+    if (guardian?.connected) guardian.send({ type: 'stop' } satisfies GuardianCommand, () => {})
+    await Promise.all([
+      generation.proxy?.close(),
+      generation.done === undefined ? undefined : withDeadline(generation.done, 12_000,
+        'DSH is still stopping; its workspace remains reserved until its processes exit.'),
+    ])
+    if (generation.ownership !== undefined) {
+      await new Promise<void>(resolve => { generation.ownership!.close(() => { resolve() }) })
+      generation.ownership = undefined
     }
+  }
 
+  private async launch(generation: Generation): Promise<string> {
+    const cwd = canonicalPath(this.folder.uri.fsPath)
+    const spec = commandFor(this.folder, stableBackendPort(cwd))
+    const env = { ...process.env, DSH_EMBED: '1', NO_COLOR: process.env.NO_COLOR ?? '1' }
+    this.telemetry('runtime.starting', { command: spec.command, args: [...spec.args], cwd, hostPid: process.pid })
+    const startUrl = await this.startGuardian(generation, { ...spec, cwd, env })
+    generation.abort.signal.throwIfAborted()
+    const authCookie = await exchangeAuthCookie(startUrl, generation.abort.signal)
+    if (authCookie === undefined) throw new Error('dsh web auth exchange failed: launch URL did not return a browser-session cookie')
+    generation.abort.signal.throwIfAborted()
     const backend = new URL(startUrl)
-    const bridgeSource = readFileSync(path.join(this.context.extensionUri.fsPath, 'dist', 'bridge.js'), 'utf8')
-    let authCookie: string | undefined
-    try {
-      authCookie = await exchangeAuthCookie(startUrl)
-    } catch (error) {
-      throw new Error(`dsh web auth exchange failed: ${String(error)}`)
-    }
-    if (authCookie === undefined) {
-      throw new Error('dsh web auth exchange failed: launch URL did not return a browser-session cookie')
-    }
-    this.telemetry('runtime.auth-exchanged', { backendPort: backend.port })
-    const proxy = new DshBridgeProxy(backend.origin, bridgeSource, {
-      cwd,
-      canonicalCwd,
-      title: this.folder.name,
-      theme: this.getTheme(),
-      locale: vscode.env.language,
-    }, authCookie)
+    const proxy = new DshBridgeProxy(backend.origin,
+      readFileSync(path.join(this.context.extensionUri.fsPath, 'dist', 'bridge.js'), 'utf8'), {
+        cwd: this.folder.uri.fsPath, canonicalCwd: cwd, title: this.folder.name,
+        theme: this.getTheme(), locale: vscode.env.language,
+      }, authCookie)
+    generation.proxy = proxy
     const port = await proxy.listen(EMBED_PROXY_PORT)
-    this.proxy = proxy
-    this.webUrl = proxy.origin
-    this.telemetry('runtime.ready', { backendPort: Number(backend.port), proxyPort: port, cwd })
-    this.output.appendLine(`[runtime] ready: ${proxy.origin} -> ${startUrl.replace(/\?token=.*$/u, '/?token=<redacted>')}`)
-    return this.webUrl
+    generation.abort.signal.throwIfAborted()
+    if (generation.failure !== undefined) throw generation.failure
+    generation.url = proxy.origin
+    this.telemetry('runtime.ready', { backendPort: Number(backend.port), proxyPort: port, cwd, hostPid: process.pid })
+    this.output.appendLine(`[runtime] ready: ${proxy.origin}`)
+    return proxy.origin
   }
 
-  /**
-   * Probe the CLI version before starting it. DeepSeek Harness is a developer
-   * preview and the extension drives its Web client protocol directly: an older
-   * CLI cannot be served by this build, and refusing it here produces a readable
-   * diagnosis instead of a boot timeout or a half-rendered page.
-   * @param command - executable that would be spawned.
-   * @param cwd - workspace folder used for the probe.
-   * @param env - child environment.
-   */
-  private async checkVersion(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
-    const output = await new Promise<string>((resolve) => {
-      execFile(command, ['--version'], { cwd, env, timeout: VERSION_PROBE_TIMEOUT_MS, windowsHide: true },
-        (error, stdout, stderr) => {
-          const text = String(stdout) + String(stderr)
-          if (error !== null && text.trim() === '') {
-            this.output.appendLine('[runtime] version probe failed: ' + error.message)
-            resolve('')
-            return
-          }
-          resolve(text)
-        })
+  private startGuardian(generation: Generation, spec: LaunchSpec): Promise<string> {
+    const guardian = fork(path.join(this.context.extensionUri.fsPath, 'dist', 'runtime-guardian.js'), [], {
+      detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: [],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     })
-    const gate = evaluateDshVersion(output)
-    this.telemetry('runtime.version', { command, version: gate.version ?? null, ok: gate.ok })
-    this.output.appendLine('[runtime] version check: ' + gate.message)
-    if (!gate.ok) throw new Error(gate.message)
-  }
-
-  /**
-   * Spawn one backend generation and wait for the authenticated URL it prints.
-   * @param spec - command and args for this attempt.
-   * @param cwd - workspace folder the backend is pinned to.
-   * @param canonicalCwd - resolved form of `cwd`, for telemetry.
-   * @param env - child environment.
-   * @returns the printed launch URL.
-   */
-  private async startProcess(spec: CommandSpec, cwd: string, canonicalCwd: string, env: NodeJS.ProcessEnv): Promise<string> {
-    this.telemetry('runtime.starting', { command: spec.command, args: [...spec.args], cwd, canonicalCwd })
-    this.output.appendLine(`[runtime] starting: ${spec.command} ${spec.args.join(' ')} (cwd ${cwd})`)
-    const child = spawn(spec.command, [...spec.args], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+    generation.guardian = guardian
+    guardian.unref()
+    guardian.channel?.unref()
+    const processes = new Map<number, ProcessTree>()
+    generation.done = new Promise<void>((resolve, reject) => {
+      guardian.once('error', error => { reject(error) })
+      guardian.once('exit', () => {
+        // A surviving Host is the fallback owner if the guardian itself crashes.
+        void Promise.all([...processes.values()].map(tree => tree.stop())).then(() => { resolve() }, reject)
+      })
     })
-    this.child = child
-    let settled = false
-    return await new Promise<string>((resolve, reject) => {
-      let stderr = ''
-      let stdout = ''
-      const timer = setTimeout(() => {
+    // The startup listener reports spawn errors; keep the completion rejection observed too.
+    void generation.done.catch(() => {})
+    return new Promise<string>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error, url = ''): void => {
         if (settled) return
         settled = true
-        reject(new Error(`dsh web did not print a URL within ${String(START_TIMEOUT_MS / 1000)}s\n${stdout}\n${stderr}`))
-      }, START_TIMEOUT_MS)
-      const onData = (chunk: Buffer | string): void => {
-        const text = chunk.toString()
-        stdout += text
-        this.output.append(text)
-        const match = /(https?:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+)/u.exec(text)
-        if (match !== null && !settled) {
-          settled = true
-          clearTimeout(timer)
-          resolve(match[1])
-        }
+        clearTimeout(timer)
+        generation.abort.signal.removeEventListener('abort', cancelled)
+        if (error !== undefined) reject(error)
+        else resolve(url)
       }
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', onData)
-      child.stderr.setEncoding('utf8')
-      child.stderr.on('data', (chunk: string) => {
-        stderr += chunk
-        this.output.append(chunk)
-      })
-      child.once('error', (error) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        reject(new Error(`failed to start ${spec.command}: ${error.message}`))
-      })
-      child.once('exit', (code, signal) => {
-        this.output.appendLine(`[runtime] exited code=${String(code)} signal=${String(signal)}`)
-        this.telemetry('runtime.exited', { code, signal })
-        if (settled) {
-          this.change.fire()
-          return
+      const cancelled = (): void => { finish(new Error('Runtime startup cancelled')) }
+      const timer = setTimeout(() => { finish(new Error('DSH guardian startup timed out')) }, START_TIMEOUT_MS)
+      generation.abort.signal.addEventListener('abort', cancelled, { once: true })
+      guardian.on('message', (event: GuardianEvent, handle) => {
+        switch (event.type) {
+          case 'ownership':
+            if (!(handle instanceof Server)) { finish(new Error('DSH guardian did not transfer workspace ownership')); break }
+            generation.ownership = handle
+            handle.unref()
+            handle.on('connection', socket => {
+              socket.on('error', () => { socket.destroy() })
+              socket.end(JSON.stringify(event.identity) + '\n')
+              socket.setTimeout(1000, () => { socket.destroy() })
+            })
+            break
+          case 'process-started': processes.set(event.pid, new ProcessTree(event.pid)); break
+          case 'process-reaped': processes.delete(event.pid); break
+          case 'log': this.output.append(event.text); break
+          case 'version':
+            this.output.appendLine(`[runtime] ${event.message}`)
+            this.telemetry('runtime.version', { version: event.version ?? null, ok: event.ok })
+            break
+          case 'url':
+            this.telemetry('runtime.spawned', { hostPid: process.pid, guardianPid: guardian.pid, backendPid: event.pid })
+            finish(undefined, event.url)
+            break
+          case 'failure':
+            generation.failure = new Error(event.message)
+            generation.url = undefined
+            this.output.appendLine(`[runtime] ${event.message}`)
+            finish(generation.failure)
+            break
+          case 'stopped': break
         }
-        settled = true
-        clearTimeout(timer)
-        reject(new Error(`dsh web exited before ready (code ${String(code)}, signal ${String(signal)})\n${stdout}\n${stderr}`))
+      })
+      guardian.once('error', error => { finish(error) })
+      guardian.once('exit', (code, signal) => {
+        generation.url = undefined
+        generation.failure ??= new Error(`DSH guardian exited code=${String(code)} signal=${String(signal)}`)
+        finish(generation.failure)
+        this.telemetry('runtime.exited', { code, signal })
+        if (this.current === generation && !generation.abort.signal.aborted && !this.disposed) this.change.fire()
+      })
+      guardian.send({ type: 'start', spec } satisfies GuardianCommand, error => {
+        if (error !== null) finish(error)
       })
     })
   }
+}
+
+function withDeadline<T>(pending: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { reject(new Error(message)) }, milliseconds)
+    void pending.then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
+  })
 }

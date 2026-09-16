@@ -63,6 +63,9 @@ function copyResponseHeaders(headers: Record<string, string | string[] | undefin
 export class DshBridgeProxy {
   private server: Server | undefined
   private port = 0
+  private closing: Promise<void> | undefined
+  private readonly sockets = new Set<Duplex>()
+  private readonly requests = new Set<ReturnType<typeof httpRequest>>()
 
   /**
    * @param backendOrigin - Spawned server origin, e.g. `http://127.0.0.1:38709`.
@@ -81,8 +84,16 @@ export class DshBridgeProxy {
 
   /** Bind the proxy on a loopback port. */
   listen(requestedPort = 0): Promise<number> {
+    if (this.closing !== undefined) return Promise.reject(new Error('DSH proxy is closing'))
     if (this.server !== undefined) return Promise.resolve(this.port)
-    this.server = createServer((req, res) => { void this.handle(req, res) })
+    this.server = createServer((req, res) => {
+      if (this.closing !== undefined) { req.destroy(); return }
+      void this.handle(req, res).catch(() => {
+        if (!res.headersSent) res.writeHead(502)
+        res.end('dsh backend unavailable')
+      })
+    })
+    this.server.on('connection', socket => { this.track(socket) })
     this.server.on('upgrade', (req, socket, head) => { this.upgrade(req, socket as Duplex, head) })
     return this.listenOn(requestedPort)
   }
@@ -116,9 +127,26 @@ export class DshBridgeProxy {
 
   /** Close the proxy; pending connections end with the extension. */
   close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing
     const server = this.server
     this.server = undefined
-    return server === undefined ? Promise.resolve() : new Promise((resolve) => { server.close(() => { resolve() }) })
+    const pending: Promise<void>[] = []
+    for (const request of this.requests) pending.push(new Promise(resolve => { request.once('close', resolve) }))
+    for (const socket of this.sockets) pending.push(new Promise(resolve => { socket.once('close', () => { resolve() }) }))
+    pending.push(new Promise(resolve => {
+      if (server === undefined) resolve()
+      else server.close(() => { resolve() })
+    }))
+    this.closing = Promise.all(pending).then(() => {})
+    for (const request of this.requests) request.destroy()
+    for (const socket of this.sockets) socket.destroy()
+    return this.closing
+  }
+
+  private track(socket: Duplex): void {
+    this.sockets.add(socket)
+    socket.once('close', () => { this.sockets.delete(socket) })
+    if (this.closing !== undefined) socket.destroy()
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -154,7 +182,15 @@ export class DshBridgeProxy {
       path: req.url,
       headers,
       agent: false,
-    }, (upstreamResponse) => { void this.relay(upstreamResponse, res, req.method ?? 'GET') })
+    }, (upstreamResponse) => {
+      clearTimeout(timer)
+      upstreamResponse.on('error', () => { res.destroy() })
+      void this.relay(upstreamResponse, res, req.method ?? 'GET').catch(() => { res.destroy() })
+    })
+    const timer = setTimeout(() => { upstream.destroy(new Error('DSH upstream response timed out')) }, 30_000)
+    this.requests.add(upstream)
+    upstream.once('close', () => { clearTimeout(timer); this.requests.delete(upstream) })
+    res.once('close', () => { upstream.destroy() })
     upstream.on('error', () => {
       if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
       res.end('dsh backend unavailable')
@@ -165,8 +201,10 @@ export class DshBridgeProxy {
 
   /** Raw TCP tunnel for WebSocket upgrades (`/api/remote.mux`). */
   private upgrade(req: IncomingMessage, client: Duplex, head: Buffer): void {
+    if (this.closing !== undefined) { client.destroy(); return }
     const backend = new URL(this.backendOrigin)
     const upstream = connect(Number(backend.port), backend.hostname, () => {
+      clearTimeout(timer)
       const headers = copyHeaders(req.headers)
       headers.host = backend.host
       headers.origin = backend.origin
@@ -184,6 +222,10 @@ export class DshBridgeProxy {
       upstream.pipe(client)
       client.pipe(upstream)
     })
+    this.track(upstream)
+    const timer = setTimeout(() => { upstream.destroy(); client.destroy() }, 10_000)
+    upstream.once('close', () => { clearTimeout(timer); client.destroy() })
+    client.once('close', () => { upstream.destroy() })
     upstream.on('error', () => { client.destroy() })
     client.on('error', () => { upstream.destroy() })
   }
@@ -196,7 +238,13 @@ export class DshBridgeProxy {
     const mediaType = String(upstream.headers['content-type'] ?? '')
     if (method !== 'HEAD' && mediaType.toLowerCase().includes('text/html')) {
       const chunks: Buffer[] = []
-      for await (const chunk of upstream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+      let size = 0
+      for await (const chunk of upstream) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+        size += bytes.length
+        if (size > 8 * 1024 * 1024) throw new Error('DSH HTML response exceeds 8 MiB')
+        chunks.push(bytes)
+      }
       const html = Buffer.concat(chunks).toString('utf8')
       const injected = this.inject(html)
       delete headers['content-length']
