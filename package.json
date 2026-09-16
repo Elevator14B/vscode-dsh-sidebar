@@ -1,0 +1,220 @@
+{
+  "name": "dsh-sidebar",
+  "displayName": "DSH Sidebar",
+  "description": "Unofficial VS Code sidebar for DeepSeek Harness — native session tree, file and diff navigation, drag-to-reference, clipboard and theme bridges.",
+  "version": "0.3.11",
+  "publisher": "Elevator14B",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "homepage": "https://github.com/Elevator14B/dsh-sidebar#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Elevator14B/dsh-sidebar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Elevator14B/dsh-sidebar/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "agent",
+    "coding-agent",
+    "ai",
+    "sidebar",
+    "webview"
+  ],
+  "galleryBanner": {
+    "color": "#0b1220",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "files": [
+    "dist/**",
+    "resources/**",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "dsh.embed.focus",
+        "title": "Open Agent",
+        "category": "DSH Sidebar",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "dsh.embed.restart",
+        "title": "Restart Agent Runtime",
+        "category": "DSH Sidebar",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dsh.embed.referenceSelection",
+        "title": "Reference Selection in DSH",
+        "category": "DSH Sidebar",
+        "icon": "$(quote)"
+      },
+      {
+        "command": "dsh.embed.referenceBlock",
+        "title": "Reference Code Block in DSH",
+        "category": "DSH Sidebar",
+        "icon": "$(quote)"
+      },
+      {
+        "command": "dsh.embed.referenceFile",
+        "title": "Reference File in DSH",
+        "category": "DSH Sidebar",
+        "icon": "$(quote)"
+      },
+      {
+        "command": "dsh.embed.newSession",
+        "title": "New Session",
+        "category": "DSH Sidebar",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dsh.embed.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "DSH Sidebar",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dsh.embed.openSession",
+        "title": "Open Session",
+        "category": "DSH Sidebar"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dsh-embed",
+          "title": "DSH Sidebar",
+          "icon": "resources/dsh.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsh-embed": [
+        {
+          "id": "dsh.embed.sessions",
+          "type": "tree",
+          "name": "Sessions"
+        },
+        {
+          "id": "dsh.embed.view",
+          "type": "webview",
+          "name": "Agent"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "dsh.embed.referenceSelection",
+          "when": "editorHasSelection",
+          "group": "1_modification@60"
+        },
+        {
+          "command": "dsh.embed.referenceBlock",
+          "when": "editorTextFocus",
+          "group": "1_modification@61"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "dsh.embed.referenceFile",
+          "when": "explorerResourceIsFolder != true",
+          "group": "navigation@80"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dsh.embed.newSession",
+          "when": "view == dsh.embed.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dsh.embed.refreshSessions",
+          "when": "view == dsh.embed.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dsh.embed.restart",
+          "when": "view == dsh.embed.view",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "dsh.embed.referenceSelection",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "dsh.embed.referenceBlock",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "editorTextFocus && !editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "DSH Sidebar",
+      "properties": {
+        "dsh.embed.command": {
+          "type": "string",
+          "default": "",
+          "description": "Override the executable used to start the DSH web runtime."
+        },
+        "dsh.embed.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Override the complete argument list passed to the DSH runtime command."
+        },
+        "dsh.embed.workspaceFolder": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace folder path to pin. Defaults to the first VS Code workspace folder."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "npm run build && vsce package --no-dependencies",
+    "pretest": "node esbuild.mjs",
+    "test": "node --test tests/*.test.cjs",
+    "smoke": "node scripts/smoke.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.2"
+  }
+}

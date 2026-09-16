@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+*.tsbuildinfo
+
+# Packaging artifacts
+*.vsix
+*.zip
+
+# Logs and local state
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vite/
+.npm-cache/
+
+# Editor and OS noise
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Test and coverage artifacts
+coverage/
+.vscode-test/
+playwright-report/
+
+# Local dumps
+/tmp-*
+perf/

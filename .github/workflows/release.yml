@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and attach the VSIX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run package
+      - name: Check the packaged file set
+        env:
+          PRIVATE_MARKERS: ${{ secrets.PRIVATE_MARKERS }}
+        run: |
+          set -euo pipefail
+          VSIX="$(ls ./*.vsix | head -1)"
+          unzip -l "$VSIX"
+          if unzip -Z1 "$VSIX" | grep -E -q '(^|/)[.]gitlab-ci[.]yml$|(^|/)[.]vscodeignore$|(^|/)[.]github/|^extension/(src|tests|scripts)/|(^|/)package-lock[.]json$'; then
+            echo "::error::the packaged VSIX contains a file outside the allow-list"
+            exit 1
+          fi
+          if unzip -p "$VSIX" | grep -a -E -q '/(home|Users)/[A-Za-z0-9._-]+'; then
+            echo "::error::the packaged VSIX embeds an absolute developer path"
+            exit 1
+          fi
+          if unzip -p "$VSIX" | grep -a -E -q '(@deepseek[.]com|glpat-|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)'; then
+            echo "::error::the packaged VSIX matches a credential pattern"
+            exit 1
+          fi
+          if [ -n "${PRIVATE_MARKERS}" ] && unzip -p "$VSIX" | grep -a -E -q "${PRIVATE_MARKERS}"; then
+            echo "::error::the packaged VSIX matches a configured private marker"
+            exit 1
+          fi
+      - name: Attach the VSIX to the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: "*.vsix"
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+# Publishing to the VS Code Marketplace or Open VSX is intentionally not wired
+# up yet: it needs a publisher identity and, from December 2026 on, Entra ID
+# based authentication instead of a personal access token.
