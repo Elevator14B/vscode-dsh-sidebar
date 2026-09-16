@@ -28,7 +28,8 @@ jobs:
           set -euo pipefail
           VSIX="$(ls ./*.vsix | head -1)"
           unzip -l "$VSIX"
-          if unzip -Z1 "$VSIX" | grep -E -q '(^|/)[.]gitlab-ci[.]yml$|(^|/)[.]vscodeignore$|(^|/)[.]github/|^extension/(src|tests|scripts)/|(^|/)package-lock[.]json$'; then
+          # No dotfile and nothing outside the allow-list may ship.
+          if unzip -Z1 "$VSIX" | grep -E -q '(^|/)\.[^/]+$|(^|/)[.]github/|^extension/(src|tests|scripts)/|(^|/)package-lock[.]json$'; then
             echo "::error::the packaged VSIX contains a file outside the allow-list"
             exit 1
           fi
