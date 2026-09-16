@@ -1,7 +1,7 @@
 {
   "name": "dsh-sidebar",
   "displayName": "DSH Sidebar",
-  "description": "Unofficial VS Code sidebar for DeepSeek Harness — native session tree, file and diff navigation, drag-to-reference, clipboard and theme bridges.",
+  "description": "VS Code sidebar for DeepSeek Harness: native session tree, file and diff navigation, drag-to-reference, clipboard and theme bridges.",
   "version": "0.3.11",
   "publisher": "Elevator14B",
   "license": "MIT",

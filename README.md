@@ -4,11 +4,13 @@
 [![release](https://img.shields.io/github/v/release/Elevator14B/vscode-dsh-sidebar)](https://github.com/Elevator14B/vscode-dsh-sidebar/releases/latest)
 [![license](https://img.shields.io/github/license/Elevator14B/vscode-dsh-sidebar)](LICENSE)
 
-**Unofficial.** This extension is not affiliated with, endorsed by, or maintained by DeepSeek. It drives
-the open-source [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) CLI (`dsh`) that you
-install and run yourself.
+Embed the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) web agent in a VS Code
+sidebar webview, pinned to the current workspace folder. It drives the open-source `dsh` CLI you install
+yourself.
 
-Embed the DeepSeek Harness web agent in a VS Code sidebar webview, pinned to the current workspace folder.
+- Maintainer: [@Elevator14B](https://github.com/Elevator14B)
+- Environment: VS Code 1.96+, DSH `0.1.5-rc.1` or newer (tested with `0.1.5-rc.2`), Node.js 22+ on the
+  host's `PATH`
 
 The extension starts a DSH web runtime (`dsh web`) with the first VS Code workspace folder as its working
 directory, proxies the authenticated page into a sidebar webview, and bridges the two sides: the page's own
@@ -44,8 +46,7 @@ the theme all live in VS Code natively.
 
 - VS Code 1.96+
 - Node.js 22+ on the `PATH` of the machine that hosts the folder (Remote-SSH and containers are
-  supported). `dsh` is a Node CLI, so it runs under whichever `node` it finds there — VS Code's bundled Node
-  is not used. The version requirement is DeepSeek Harness's, not this extension's.
+  supported): `dsh` is a Node CLI and runs under whichever `node` it finds there, not VS Code's bundled Node.
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) on the extension host's `PATH`:
 
   ```sh
@@ -154,5 +155,5 @@ conversation asks for a diff against HEAD.
 
 ## License
 
-[MIT](LICENSE) © 2026 Huanqi Cao. DeepSeek, DeepSeek Harness and `dsh` are the project and trademarks of
-their respective owners; this is an independent, unofficial integration.
+[MIT](LICENSE) © 2026 Huanqi Cao. A community extension for
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), which is maintained by DeepSeek AI.
