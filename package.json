@@ -6,13 +6,13 @@
   "publisher": "Elevator14B",
   "license": "MIT",
   "icon": "resources/icon.png",
-  "homepage": "https://github.com/Elevator14B/dsh-sidebar#readme",
+  "homepage": "https://github.com/Elevator14B/vscode-dsh-sidebar#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Elevator14B/dsh-sidebar.git"
+    "url": "https://github.com/Elevator14B/vscode-dsh-sidebar.git"
   },
   "bugs": {
-    "url": "https://github.com/Elevator14B/dsh-sidebar/issues"
+    "url": "https://github.com/Elevator14B/vscode-dsh-sidebar/issues"
   },
   "keywords": [
     "deepseek",

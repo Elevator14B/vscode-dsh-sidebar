@@ -6,7 +6,7 @@ change so we can agree on the shape first.
 ## Development
 
 ```sh
-git clone https://github.com/Elevator14B/dsh-sidebar.git
+git clone https://github.com/Elevator14B/vscode-dsh-sidebar.git
 cd dsh-sidebar
 npm ci
 npm install -g @deepseek-ai/dsh   # the runtime the extension drives

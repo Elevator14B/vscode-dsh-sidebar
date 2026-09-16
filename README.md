@@ -1,8 +1,8 @@
 # DSH Sidebar
 
-[![ci](https://github.com/Elevator14B/dsh-sidebar/actions/workflows/ci.yml/badge.svg)](https://github.com/Elevator14B/dsh-sidebar/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/Elevator14B/dsh-sidebar)](https://github.com/Elevator14B/dsh-sidebar/releases/latest)
-[![license](https://img.shields.io/github/license/Elevator14B/dsh-sidebar)](LICENSE)
+[![ci](https://github.com/Elevator14B/vscode-dsh-sidebar/actions/workflows/ci.yml/badge.svg)](https://github.com/Elevator14B/vscode-dsh-sidebar/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/Elevator14B/vscode-dsh-sidebar)](https://github.com/Elevator14B/vscode-dsh-sidebar/releases/latest)
+[![license](https://img.shields.io/github/license/Elevator14B/vscode-dsh-sidebar)](LICENSE)
 
 **Unofficial.** This extension is not affiliated with, endorsed by, or maintained by DeepSeek. It drives
 the open-source [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) CLI (`dsh`) that you
@@ -58,7 +58,7 @@ The extension refuses to start against a CLI older than `0.1.5-rc.1` and prints 
 ## Install
 
 No Marketplace listing yet — install the VSIX from
-[Releases](https://github.com/Elevator14B/dsh-sidebar/releases/latest):
+[Releases](https://github.com/Elevator14B/vscode-dsh-sidebar/releases/latest):
 
 ```sh
 code --install-extension dsh-sidebar-<version>.vsix

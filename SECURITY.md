@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Use GitHub's private [security advisory](https://github.com/Elevator14B/dsh-sidebar/security/advisories/new)
+Use GitHub's private [security advisory](https://github.com/Elevator14B/vscode-dsh-sidebar/security/advisories/new)
 form rather than a public issue. Please include the version, the VS Code version, what you observed and, if
 you can, a minimal reproduction. Expect an initial reply within a week; this is a personal project without a
 bounty program.
