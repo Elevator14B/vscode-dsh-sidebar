@@ -532,9 +532,13 @@
 
   var lastWorkspaceStateKey = null
   /**
-   * Publish the pinned workspace's session order to the host when it changes,
-   * so the native Sessions tree can mirror the web sidebar's per-workspace
-   * list exactly (unbound "cwd-only" sessions stay out of the tree).
+   * Publish the pinned workspace's session order and archive set to the host
+   * when either changes, so the native Sessions tree can mirror the web
+   * sidebar's per-workspace list exactly (unbound "cwd-only" sessions stay out
+   * of the tree, and an archived session leaves it without reordering the
+   * rest). Both sets live on the same list snapshot and both belong in the
+   * dedupe key: archiving changes nothing else, so a key built from the order
+   * alone would swallow that publish.
    */
   function publishWorkspaceState() {
     var services = state.services
@@ -545,10 +549,16 @@
     })
     if (workspace === undefined) return
     var ids = workspace.sessionIds || []
-    var key = ids.join(',')
+    var archived = list.archivedSessionIds || []
+    var key = ids.join(',') + '\u0000' + archived.join(',')
     if (key === lastWorkspaceStateKey) return
     lastWorkspaceStateKey = key
-    post({ type: 'workspace-state', workspaceId: workspace.workspaceId, sessionIds: ids.slice() })
+    post({
+      type: 'workspace-state',
+      workspaceId: workspace.workspaceId,
+      sessionIds: ids.slice(),
+      archivedSessionIds: archived.slice(),
+    })
   }
 
   /** Coalesce window folding a live turn's frame burst into one repaint. */
@@ -1263,6 +1273,120 @@
   patchClipboardWriteText()
   patchExecCommand()
 
+  // ---- delivered-file cards -------------------------------------------------
+
+  var DELIVERED_CARD_SELECTOR = '[data-presented-file]'
+  var DELIVERED_PREVIEW_SELECTOR = 'button[class*="_cardPreview"]'
+  var DELIVERED_OPEN_SELECTOR = 'button[class*="_open"]'
+  var DELIVERED_CHEVRON_SELECTOR = 'button[class*="_chevron"]'
+  var DELIVERED_MARK_ATTR = 'data-dsh-vscode-card'
+  var DELIVERED_STYLE_ID = 'dsh-vscode-bridge-style'
+
+  /**
+   * The app prints a host-desktop status row inside every delivered-file card —
+   * 此主机没有可用的桌面，无法打开文件或文件夹, or 无法读取主机桌面信息 with a 重试
+   * button — because the serving host reports no desktop. VS Code is the opener
+   * in the embed, so those rows are noise. One bridge-owned stylesheet hides
+   * them and nothing else; the class hash changes between DSH builds, the
+   * `_hostStatus` suffix does not.
+   */
+  function injectDeliveredStyle() {
+    if (typeof document.getElementById === 'function' && document.getElementById(DELIVERED_STYLE_ID)) return
+    var sheet = document.createElement('style')
+    sheet.setAttribute('id', DELIVERED_STYLE_ID)
+    sheet.textContent = '[class*="_hostStatus"]{display:none !important}'
+    var parent = document.head || document.documentElement
+    if (parent && typeof parent.appendChild === 'function') parent.appendChild(sheet)
+  }
+
+  /** The chevron of one card, or null while the card has not rendered one. */
+  function deliveredChevron(card) {
+    return typeof card.querySelector === 'function' ? card.querySelector(DELIVERED_CHEVRON_SELECTOR) : null
+  }
+
+  /**
+   * The app disables a card's chevron when the host reports no desktop, and a
+   * disabled button emits no click at all — the bridge's menu would be
+   * unreachable. The card is marked once and the button is left enabled; React
+   * re-renders rewrite both, which is what the observer below re-applies.
+   */
+  function enableDeliveredCard(card) {
+    var chevron = deliveredChevron(card)
+    if (chevron === null) return
+    if (typeof card.getAttribute !== 'function' || card.getAttribute(DELIVERED_MARK_ATTR) === null) {
+      card.setAttribute(DELIVERED_MARK_ATTR, '')
+    }
+    if (chevron.disabled) chevron.disabled = false
+    if (typeof chevron.removeAttribute === 'function') chevron.removeAttribute('disabled')
+    if (typeof chevron.getAttribute !== 'function' || chevron.getAttribute('aria-disabled') !== 'false') {
+      chevron.setAttribute('aria-disabled', 'false')
+    }
+  }
+
+  /** Re-apply the bridge's ownership to every card inside one subtree. */
+  function syncDeliveredCards(root) {
+    if (root === null || root === undefined || typeof root.querySelectorAll !== 'function') return
+    var cards = root.querySelectorAll(DELIVERED_CARD_SELECTOR)
+    for (var index = 0; index < cards.length; index += 1) enableDeliveredCard(cards[index])
+  }
+
+  /** Re-apply to one mutated node: the card it belongs to, plus its subtree. */
+  function applyDeliveredNode(node) {
+    if (node === null || node === undefined || typeof node.closest !== 'function') return
+    var card = node.closest(DELIVERED_CARD_SELECTOR)
+    if (card !== null && card !== undefined) enableDeliveredCard(card)
+    syncDeliveredCards(node)
+  }
+
+  /**
+   * A card renders — and React rewrites its chevron's `disabled` attribute —
+   * long after boot, so enablement follows the mutations that can carry a card
+   * instead of polling for one. `disabled` is the only attribute the app
+   * toggles on a chevron; a re-render that swaps nodes arrives as childList.
+   */
+  function observeDeliveredCards() {
+    if (typeof MutationObserver !== 'function') return
+    var target = document.documentElement
+    if (target === null || target === undefined) return
+    var observer = new MutationObserver(function (records) {
+      for (var index = 0; index < records.length; index += 1) {
+        var record = records[index]
+        if (record.type === 'attributes') {
+          applyDeliveredNode(record.target)
+          continue
+        }
+        var added = record.addedNodes ? record.addedNodes : []
+        for (var node = 0; node < added.length; node += 1) applyDeliveredNode(added[node])
+      }
+    })
+    observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
+  }
+
+  /**
+   * The file one delivered-file card opens. The whole-card preview button
+   * carries the path as its tooltip — absolute when the session cwd is known,
+   * workspace-relative otherwise — while the visible 打开 button carries none,
+   * so both read that tooltip first and the preview button's own text last. No
+   * path means no interception: the app keeps its own handling.
+   */
+  function deliveredFilePath(card, trigger) {
+    var preview = typeof card.querySelector === 'function' ? card.querySelector(DELIVERED_PREVIEW_SELECTOR) : null
+    var sources = [preview, trigger]
+    for (var index = 0; index < sources.length; index += 1) {
+      var node = sources[index]
+      if (node === null || node === undefined) continue
+      var title = typeof node.getAttribute === 'function' ? node.getAttribute('title') : null
+      if (typeof title === 'string' && title.trim() !== '') return title.trim()
+    }
+    var visible = preview === null || preview === undefined ? trigger : preview
+    var text = typeof visible.textContent === 'string' ? visible.textContent.trim() : ''
+    return text === '' ? undefined : text
+  }
+
+  injectDeliveredStyle()
+  syncDeliveredCards(document)
+  observeDeliveredCards()
+
   // ---- tool path link interception ------------------------------------------
 
   /**
@@ -1303,6 +1427,36 @@
   document.addEventListener('click', function (event) {
     var clicked = event.target
     if (!clicked || !clicked.closest) return
+    // A delivered-file card: its whole-card preview button, its visible 打开
+    // button and its chevron all end in the serving host's own desktop opener,
+    // which a headless host cannot honour. Every open gesture lands in VS Code.
+    var card = clicked.closest(DELIVERED_CARD_SELECTOR)
+    if (card !== null && card !== undefined) {
+      var chevron = clicked.closest(DELIVERED_CHEVRON_SELECTOR)
+      if (chevron !== null) {
+        // The app's chevron menu holds nothing but host-desktop actions, so the
+        // bridge answers this click with its own menu — and stops this one
+        // before the app can open that menu. The app rendered the chevron
+        // disabled; enableDeliveredCard keeps it clickable (a disabled button
+        // emits no click at all).
+        event.preventDefault()
+        event.stopPropagation()
+        var menuPath = deliveredFilePath(card, chevron)
+        if (menuPath !== undefined) openCardMenu(menuPath, chevron, event.clientX, event.clientY)
+        return
+      }
+      var opener = clicked.closest(DELIVERED_PREVIEW_SELECTOR)
+      if (opener === null) opener = clicked.closest(DELIVERED_OPEN_SELECTOR)
+      if (opener !== null) {
+        var cardPath = deliveredFilePath(card, opener)
+        if (cardPath !== undefined) {
+          event.preventDefault()
+          event.stopPropagation()
+          post({ type: 'open-file', path: cardPath })
+          return
+        }
+      }
+    }
     // A produced-file chip and a tool card's file link both open in the editor.
     // Their markup is what carries the path: the chip's tooltip holds it whole,
     // a file link's text is the path the card advertises.
@@ -1402,12 +1556,18 @@
       external: '在外部浏览器中打开',
       mail: '用外部程序打开',
       copy: '复制链接',
+      editor: '在编辑器中打开',
+      beside: '在右侧打开',
+      reveal: '在资源管理器中显示',
     },
     en: {
       internal: 'Open in Internal Browser',
       external: 'Open in External Browser',
       mail: 'Open in External Application',
       copy: 'Copy Link',
+      editor: 'Open in Editor',
+      beside: 'Open to the Side',
+      reveal: 'Reveal in Explorer',
     },
   }
 
@@ -1467,18 +1627,40 @@
     if (event.key === 'Escape') closeLinkMenu()
   }
 
+  /** The surface every bridge-owned menu shares. */
+  var MENU_SURFACE = 'position:fixed;z-index:2147483647;min-width:180px;padding:4px 0;'
+    + 'border:1px solid ' + MENU_BORDER + ';border-radius:6px;background:' + MENU_BACKGROUND + ';'
+    + 'color:' + MENU_FOREGROUND + ';font-family:var(--vscode-font-family, sans-serif);'
+    + 'font-size:12px;box-shadow:0 2px 8px rgba(0, 0, 0, 0.35);'
+
+  /** Mount one prepared menu at a point, clamped, and arm its dismissal. */
+  function showMenu(menu, label, x, y) {
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('aria-label', label)
+    menu.style.cssText = MENU_SURFACE
+    document.documentElement.appendChild(menu)
+    // Clamp after measuring so a menu near the viewport edge still shows whole.
+    var width = menu.offsetWidth
+    var height = menu.offsetHeight
+    var left = Math.max(4, Math.min(x, window.innerWidth - width - 4))
+    var top = Math.max(4, Math.min(y, window.innerHeight - height - 4))
+    menu.style.left = String(left) + 'px'
+    menu.style.top = String(top) + 'px'
+    linkMenu = menu
+    document.addEventListener('mousedown', menuOutside, true)
+    document.addEventListener('contextmenu', menuOutside, true)
+    document.addEventListener('keydown', menuKey, true)
+    window.addEventListener('blur', closeLinkMenu)
+    window.addEventListener('resize', closeLinkMenu)
+    document.addEventListener('scroll', closeLinkMenu, true)
+  }
+
   /** Show the target chooser for one link at the pointer. */
   function openLinkMenu(target, x, y) {
     closeLinkMenu()
     var copy = menuCopy()
     var menu = document.createElement('div')
-    menu.setAttribute('role', 'menu')
-    menu.setAttribute('aria-label', target.url)
     menu.setAttribute('data-dsh-link-menu', '')
-    menu.style.cssText = 'position:fixed;z-index:2147483647;min-width:180px;padding:4px 0;'
-      + 'border:1px solid ' + MENU_BORDER + ';border-radius:6px;background:' + MENU_BACKGROUND + ';'
-      + 'color:' + MENU_FOREGROUND + ';font-family:var(--vscode-font-family, sans-serif);'
-      + 'font-size:12px;box-shadow:0 2px 8px rgba(0, 0, 0, 0.35);'
     if (target.mail) {
       menu.appendChild(menuItem(copy.mail, function () {
         post({ type: 'open-url', url: target.url, target: 'external' })
@@ -1494,22 +1676,46 @@
     menu.appendChild(menuItem(copy.copy, function () {
       post({ type: 'copy-text', text: target.url })
     }))
-    document.documentElement.appendChild(menu)
-    // Clamp after measuring so a link near the viewport edge still shows whole.
-    var width = menu.offsetWidth
-    var height = menu.offsetHeight
-    var left = Math.max(4, Math.min(x, window.innerWidth - width - 4))
-    var top = Math.max(4, Math.min(y, window.innerHeight - height - 4))
-    menu.style.left = String(left) + 'px'
-    menu.style.top = String(top) + 'px'
-    linkMenu = menu
-    document.addEventListener('mousedown', menuOutside, true)
-    document.addEventListener('contextmenu', menuOutside, true)
-    document.addEventListener('keydown', menuKey, true)
-    window.addEventListener('blur', closeLinkMenu)
-    window.addEventListener('resize', closeLinkMenu)
-    document.addEventListener('scroll', closeLinkMenu, true)
+    showMenu(menu, target.url, x, y)
     debug.linkMenu = target.url
+  }
+
+  /**
+   * The point a card menu hangs from: under its chevron, or at the pointer when
+   * the button cannot be measured (a synthetic click carries no coordinates).
+   */
+  function menuAnchor(chevron, x, y) {
+    if (chevron !== null && chevron !== undefined && typeof chevron.getBoundingClientRect === 'function') {
+      var rect = chevron.getBoundingClientRect()
+      if (rect !== null && typeof rect.left === 'number' && typeof rect.bottom === 'number') {
+        return { x: rect.left, y: rect.bottom }
+      }
+    }
+    return { x: x, y: y }
+  }
+
+  /**
+   * Show the delivered-file card menu. The app's own chevron menu offers only
+   * host-desktop actions, which can never work on a headless serving host;
+   * every entry here names an opener that can.
+   */
+  function openCardMenu(path, chevron, x, y) {
+    closeLinkMenu()
+    var copy = menuCopy()
+    var menu = document.createElement('div')
+    menu.setAttribute('data-dsh-card-menu', '')
+    menu.appendChild(menuItem(copy.editor, function () {
+      post({ type: 'open-file', path: path })
+    }))
+    menu.appendChild(menuItem(copy.beside, function () {
+      post({ type: 'open-file', path: path, column: 'beside' })
+    }))
+    menu.appendChild(menuItem(copy.reveal, function () {
+      post({ type: 'reveal-file', path: path })
+    }))
+    var anchor = menuAnchor(chevron, x, y)
+    showMenu(menu, path, anchor.x, anchor.y)
+    debug.cardMenu = path
   }
 
   /**

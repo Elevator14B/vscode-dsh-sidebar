@@ -3,6 +3,26 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## 0.3.12
+
+### Added
+
+- **Sessions tree: manual order and archive.** Drag one session row onto another to move it there, or use
+  *Move Session Up*, *Move Session Down* and *Archive Session* from the row's context menu. Both mutations go
+  through the Workspace RPCs the web sidebar itself uses (`workspace/insertSessionBefore`,
+  `workspace/archiveSession`), so the two surfaces keep one manual order and one archive set: archived rows
+  leave the native tree the same way they leave the web list.
+- **Delivery cards open in VS Code.** The delivery cards at the end of a turn route every open gesture to the
+  editor — click opens the file, the chevron offers *Open in Editor*, *Open to the Side* and *Reveal in
+  Explorer* — instead of the serving host's desktop, which a Remote-SSH host does not have.
+- `npm run smoke` now also drives `workspace/insertSessionBefore` and `workspace/archiveSession` against a
+  real `dsh` (five checks).
+
+### Changed
+
+- The RPC helper and the session order/archive actions moved to `src/session-actions.ts`;
+  `src/session-panel.ts` re-exports the helper, keeps the manual order and drops archived sessions.
+
 ## 0.3.11
 
 ### Added

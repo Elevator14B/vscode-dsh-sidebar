@@ -22,9 +22,14 @@ the theme all live in VS Code natively.
 - **Workspace = VS Code folder.** No workspace picker: the DSH workspace is pinned to the folder you have
   open, and session switching happens in a native VS Code tree.
 - **Native Sessions tree.** Lists the sessions of the pinned workspace in the same order and with the same
-  titles as the web sidebar, with New Session and refresh actions.
+  titles as the web sidebar, with New Session and refresh actions. Drag a row onto another to move it, or use
+  *Move Session Up* / *Move Session Down* / *Archive Session* from its context menu; both go through the web
+  sidebar's own Workspace RPCs, so order and archive state stay shared between the two surfaces.
 - **Native file and diff navigation.** `read` / `write` tool paths in the conversation open the file in
   VS Code; `edit` tool paths open a **tool-change diff** (`old_string` → `new_string`, independent of git).
+  The closing turn's produced-file chips and delivery cards open in the editor too, and the card's chevron
+  offers *Open in Editor*, *Open to the Side* and *Reveal in Explorer* — the host's desktop application is
+  never the target, which is what makes the cards usable over Remote-SSH.
 - **Links open inside VS Code.** URLs in the conversation open in the built-in Simple Browser webview, with
   an OS-browser fallback.
 - **Drag-to-reference.** Drag an editor tab, an Explorer row, or a compatible native drag into the sidebar to
@@ -96,10 +101,12 @@ probes the CLI version at startup (`src/dsh-version.ts`) and refuses to boot on 
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
-| 0.3.11 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
+| 0.3.12 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
+| 0.3.11 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | First public release on GitHub. |
 
 The protocol this build speaks — the launch URL and its one-time token, the `session/list` client-request
-envelope, the boot graph and the sidebar plugin identity — is not a frozen public API. When a DSH release
+envelope, the `workspace/*` order and archive mutations, the boot graph and the sidebar plugin identity — is
+not a frozen public API. When a DSH release
 changes it, `npm run smoke` and the CI contract job are what catch it first.
 
 ## Settings
@@ -115,6 +122,8 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 - **DSH Sidebar: Open Agent**
 - **DSH Sidebar: Restart Agent Runtime**
 - **New Session** / **Refresh Sessions** (Sessions tree title bar)
+- **Move Session Up** / **Move Session Down** / **Archive Session** (session row context menu; dragging one row
+  onto another reorders directly)
 - **Reference Selection in DSH** / **Reference Code Block in DSH** (editor context menu) and
   **Reference File in DSH** (Explorer context menu)
 
@@ -125,9 +134,12 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 - `src/proxy.ts` — loopback reverse proxy (HTTP + WebSocket) that injects the auth cookie, keeps a stable
   same-origin authority, rewrites the boot theme to the VS Code theme, and serves the injected bridge script.
 - `src/bridge.js` — injected into the page: drains the DSH sidebar from the boot graph, pins the workspace,
-  intercepts tool-path links and drag/drop references, drives the theme through the page's own ThemeRuntime,
-  and relays the workspace session order for the native tree.
-- `src/session-panel.ts` — native `TreeDataProvider` reading `session/list` through the proxy.
+  intercepts tool-path links, delivery cards and drag/drop references, drives the theme through the page's own
+  ThemeRuntime, and relays the workspace order and archive set for the native tree.
+- `src/session-panel.ts` — native `TreeDataProvider` reading `session/list` through the proxy, in the manual
+  order the page publishes and without archived rows.
+- `src/session-actions.ts` — the Workspace RPCs behind the tree's reorder and archive actions, plus the pure
+  order-planning helpers the drag-and-drop controller uses.
 - `src/dsh-version.ts` — pure semver comparison and the startup gate decision.
 - `src/extension.ts` — webview shell, message relay, file/diff providers and the command surface.
 

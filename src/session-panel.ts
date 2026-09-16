@@ -3,6 +3,11 @@
  * workspace, read through the local DSH api-proxy (`session/list` unary RPC).
  */
 import * as vscode from 'vscode'
+import { dshRpc } from './session-actions'
+
+// The RPC helper lives with the Session actions now; existing callers keep
+// importing it from this module.
+export { dshRpc }
 
 interface SessionSummaryWire {
   readonly sessionId: string
@@ -15,6 +20,16 @@ interface SessionSummaryWire {
 
 interface SessionListValue {
   readonly items: readonly SessionSummaryWire[]
+}
+
+/**
+ * Workspace state published by the bridge: the pinned workspace, the web
+ * sidebar's manual session order, and the sessions the registry has archived.
+ */
+export interface WorkspaceState {
+  readonly workspaceId?: string
+  readonly sessionIds: readonly string[]
+  readonly archivedSessionIds?: readonly string[]
 }
 
 /** Read the current-session title or the durable title projection. */
@@ -70,8 +85,8 @@ export class SessionsProvider implements vscode.TreeDataProvider<SessionNode> {
   private items: SessionNode[] = []
   private readonly change = new vscode.EventEmitter<SessionNode | undefined>()
   private timer: NodeJS.Timeout | undefined
-  /** Workspace membership published by the bridge (web sidebar order). */
-  private workspaceIds: ReadonlySet<string> | undefined
+  /** Workspace state published by the bridge, in the web sidebar's order. */
+  private state: WorkspaceState | undefined
   /** Facts of the published rows; equal text means the tree has nothing to repaint. */
   private published: string | null = null
   /** Last reported read failure, so a backend that stays down repaints once. */
@@ -121,7 +136,8 @@ export class SessionsProvider implements vscode.TreeDataProvider<SessionNode> {
 
   private async read(): Promise<void> {
     const origin = this.origin()
-    if (origin === undefined || this.workspaceIds === undefined) {
+    const state = this.state
+    if (origin === undefined || state === undefined) {
       // No workspace membership yet: the web sidebar itself is empty until the
       // workspace state arrives, so an unbound session must not flash a row.
       this.publish([], [])
@@ -135,10 +151,14 @@ export class SessionsProvider implements vscode.TreeDataProvider<SessionNode> {
       // the backend may store a canonical (symlink-resolved) path while VS
       // Code reports the linked form.
       const byId = new Map(value.items.map(item => [item.sessionId, item]))
+      const archived = new Set(state.archivedSessionIds ?? [])
       // Keep the workspace's manual order, exactly like the web sidebar list.
+      // Archiving only grows a registry-global set and `session/list` still
+      // returns those sessions, so the archive filter belongs here.
       const items: SessionNode[] = []
       const facts: string[] = []
-      for (const sessionId of this.workspaceIds) {
+      for (const sessionId of state.sessionIds) {
+        if (archived.has(sessionId)) continue
         const item = byId.get(sessionId)
         if (item === undefined) continue
         const label = titleOf(item)
@@ -166,12 +186,27 @@ export class SessionsProvider implements vscode.TreeDataProvider<SessionNode> {
   }
 
   /**
-   * Adopt the workspace membership published by the bridge. The read that
-   * follows repaints only if the rows it exposes actually changed.
+   * Adopt the workspace state published by the bridge: the pinned workspace, the
+   * manual order the web sidebar shows, and the sessions it has archived. The
+   * read that follows repaints only if the rows it exposes actually changed.
    */
-  updateWorkspaceSessions(ids: readonly string[]): void {
-    this.workspaceIds = new Set(ids)
+  updateWorkspaceState(state: WorkspaceState): void {
+    this.state = state
     void this.refresh()
+  }
+
+  /** Pinned workspace of the last published state, for order mutations. */
+  get workspaceId(): string | undefined {
+    return this.state?.workspaceId
+  }
+
+  /**
+   * Ids of the rows the tree is rendering, in display order — the same order
+   * `getChildren()` returns, with archived rows and sessions the backend no
+   * longer lists already gone.
+   */
+  get displayedIds(): readonly string[] {
+    return this.items.map(item => item.sessionId)
   }
 
   /** Dispose the polling timer. */
@@ -212,39 +247,4 @@ function rowFacts(
   running: boolean,
 ): string {
   return [sessionId, label, description, blank ? '1' : '0', running ? '1' : '0'].join('\u0000')
-}
-
-/**
- * Call one DSH typert unary RPC through the loopback proxy.
- * The payload arg key is endpoint-specific: `session/list` and friends declare
- * `_request` while mutation endpoints (`session/create`, `workspace/*`) declare
- * `request`, so callers pass the exact `{ args }` object.
- */
-export async function dshRpc<T>(origin: string, endpoint: string, args: Record<string, unknown>): Promise<T> {
-  const rpcId = `ext-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  const body = {
-    type: 'client-request',
-    rpcId,
-    method: endpoint,
-    payload: { args },
-  }
-  const timeout = new AbortController()
-  const timer = setTimeout(() => { timeout.abort() }, 5000)
-  try {
-    const response = await fetch(`${origin}/api/${endpoint}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: timeout.signal,
-    })
-    if (!response.ok) throw new Error(`dsh rpc ${endpoint}: HTTP ${response.status}`)
-    const envelope = await response.json() as {
-      type: string
-      result: { ok: boolean; value?: unknown; error?: { message: string } }
-    }
-    if (!envelope.result.ok) throw new Error(`dsh rpc ${endpoint}: ${envelope.result.error?.message ?? 'failed'}`)
-    return envelope.result.value as T
-  } finally {
-    clearTimeout(timer)
-  }
 }

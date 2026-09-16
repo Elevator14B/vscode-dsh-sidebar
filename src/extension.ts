@@ -14,7 +14,8 @@ import * as path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import * as vscode from 'vscode'
 import { DshRuntime } from './runtime'
-import { SessionsProvider } from './session-panel'
+import { archiveSession, moveSessionBefore, planMove, planStep } from './session-actions'
+import { SessionsProvider, type SessionNode } from './session-panel'
 import { summarizeStartupError } from './startup-error'
 
 /** One decoded VS Code drag source (frozen contract v2). */
@@ -80,11 +81,14 @@ interface BridgeEnvelope {
   readonly mentions?: readonly string[]
   readonly workspaceId?: string
   readonly sessionIds?: readonly string[]
+  readonly archivedSessionIds?: readonly string[]
   readonly sessionId?: string
   readonly message?: string
   readonly url?: string
   /** Requested browser for `open-url`: 'internal' (default) or 'external'. */
   readonly target?: string
+  /** Requested editor column for `open-file`: 'beside' opens in the side group. */
+  readonly column?: string
 }
 
 function firstWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -680,7 +684,7 @@ export function resolveDropTargets(payload?: DropPayload): ResolvedReference[] {
  * @param raw - absolute or workspace-relative path from the page.
  * @param line - optional 1-based line to reveal; clamped to the document.
  */
-async function openFilePath(raw: string, line?: number): Promise<void> {
+async function openFilePath(raw: string, line?: number, column?: string): Promise<void> {
   const uri = resolveFileUri(raw)
   if (uri === undefined) {
     void vscode.window.showWarningMessage(`DSH Sidebar: cannot resolve path ${raw}`)
@@ -688,11 +692,29 @@ async function openFilePath(raw: string, line?: number): Promise<void> {
   }
   const document = await vscode.workspace.openTextDocument(uri)
   const options: vscode.TextDocumentShowOptions = { preview: true, preserveFocus: false }
+  // The delivery card's own split button asked for the side group; everything
+  // else takes the active one, where the user is already reading.
+  if (column === 'beside') options.viewColumn = vscode.ViewColumn.Beside
   if (typeof line === 'number' && Number.isFinite(line) && line > 0) {
     const target = Math.min(Math.floor(line) - 1, Math.max(0, document.lineCount - 1))
     options.selection = new vscode.Range(target, 0, target, 0)
   }
   await vscode.window.showTextDocument(document, options)
+}
+
+/**
+ * Select one workspace file in the Explorer, the VS Code counterpart of the
+ * web card's "reveal in the file manager" action. The page runs on the side
+ * that owns the files, so the reveal happens in this window's own tree.
+ * @param raw - absolute or workspace-relative path from the page.
+ */
+async function revealFilePath(raw: string): Promise<void> {
+  const uri = resolveFileUri(raw)
+  if (uri === undefined) {
+    void vscode.window.showWarningMessage(`DSH Sidebar: cannot resolve path ${raw}`)
+    return
+  }
+  await vscode.commands.executeCommand('revealInExplorer', uri)
 }
 
 /**
@@ -1201,6 +1223,13 @@ async function writeClipboardRequest(message: BridgeEnvelope, respond: (value: u
   }
 }
 
+/** Workspace membership the page publishes for the folder this window pins. */
+interface WorkspaceStateMessage {
+  readonly workspaceId?: string
+  readonly sessionIds: readonly string[]
+  readonly archivedSessionIds?: readonly string[]
+}
+
 function handleBridgeMessage(
   message: BridgeEnvelope,
   folder: vscode.WorkspaceFolder | undefined,
@@ -1208,7 +1237,7 @@ function handleBridgeMessage(
   respond: (value: unknown) => void,
   telemetry: (event: string, data?: Record<string, unknown>) => void,
   onShellReady: () => void,
-  onWorkspaceState?: (sessionIds: readonly string[]) => void,
+  onWorkspaceState?: (state: WorkspaceStateMessage) => void,
   onSessionsDirty?: () => void,
 ): void {
   if (message.source === 'dsh-vscode-shell') {
@@ -1252,7 +1281,14 @@ function handleBridgeMessage(
       onShellReady()
       return
     case 'open-file':
-      if (typeof message.path === 'string') void openFilePath(message.path, message.line)
+      if (typeof message.path === 'string') {
+        void openFilePath(message.path, message.line, typeof message.column === 'string' ? message.column : undefined)
+      }
+      return
+    case 'reveal-file':
+      // The web card's "reveal in the file manager" action; the page's host has
+      // no desktop, so the Explorer is the only target that exists here.
+      if (typeof message.path === 'string') void revealFilePath(message.path)
       return
     case 'open-url':
       if (typeof message.url === 'string') {
@@ -1303,7 +1339,15 @@ function handleBridgeMessage(
       output.appendLine('[bridge] drag-handled count ' + String(message.count ?? 0))
       return
     case 'workspace-state':
-      if (Array.isArray(message.sessionIds)) onWorkspaceState?.(message.sessionIds)
+      if (Array.isArray(message.sessionIds)) {
+        onWorkspaceState?.({
+          ...(typeof message.workspaceId === 'string' ? { workspaceId: message.workspaceId } : {}),
+          sessionIds: message.sessionIds.filter((id): id is string => typeof id === 'string'),
+          ...(Array.isArray(message.archivedSessionIds)
+            ? { archivedSessionIds: message.archivedSessionIds.filter((id): id is string => typeof id === 'string') }
+            : {}),
+        })
+      }
       return
     case 'sessions-dirty':
       // The page folded its own list pushes into one signal; the tree now reads
@@ -1591,6 +1635,52 @@ async function codeBlockRangeAtCursor(editor: vscode.TextEditor): Promise<LineRa
   return { startLine: 1, endLine: Math.max(1, editor.document.lineCount) }
 }
 
+/** Mime type carrying one dragged Sessions row inside the native tree view. */
+const SESSION_DRAG_MIME = 'application/vnd.code.tree.dsh.embed.sessions'
+
+/**
+ * Drag-to-reorder for the native Sessions tree: a dropped row takes the target
+ * row's place, exactly like dragging a session in the web sidebar. The move is
+ * written through the same Workspace RPC the web sidebar uses, so both surfaces
+ * keep one manual order instead of forking into a native-only arrangement.
+ */
+class SessionOrderController implements vscode.TreeDragAndDropController<SessionNode> {
+  readonly dragMimeTypes = [SESSION_DRAG_MIME]
+  readonly dropMimeTypes = [SESSION_DRAG_MIME]
+
+  /**
+   * @param sessions - Rows and the order they are currently displayed in.
+   * @param move - Writes one move through the backend.
+   */
+  constructor(
+    private readonly sessions: SessionsProvider,
+    private readonly move: (sessionId: string, beforeSessionId: string | undefined) => Promise<void>,
+  ) {}
+
+  /** @inheritdoc */
+  handleDrag(source: readonly SessionNode[], dataTransfer: vscode.DataTransfer): void {
+    const dragged = source[0]
+    if (dragged === undefined) return
+    dataTransfer.set(SESSION_DRAG_MIME, new vscode.DataTransferItem(dragged.sessionId))
+  }
+
+  /** @inheritdoc */
+  async handleDrop(target: SessionNode | undefined, dataTransfer: vscode.DataTransfer): Promise<void> {
+    const dragged = dataTransfer.get(SESSION_DRAG_MIME)?.value
+    if (target === undefined || typeof dragged !== 'string') return
+    const ids = this.sessions.displayedIds
+    // Dropping on a row means "take that row's place", which is the only drop
+    // position a VS Code tree reports — there is no above/below distinction.
+    // A target the list no longer holds must not plan: a missing index would
+    // clamp to the top and move the row there.
+    const toIndex = ids.indexOf(target.sessionId)
+    if (toIndex === -1) return
+    const plan = planMove(ids, dragged, toIndex)
+    if (plan === undefined) return
+    await this.move(dragged, plan.beforeSessionId)
+  }
+}
+
 /** Activate the embedded web runtime and native command surface. */
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('DSH Sidebar')
@@ -1635,6 +1725,45 @@ export function activate(context: vscode.ExtensionContext): void {
     ? undefined
     : new SessionsProvider(() => runtime.origin, (event, data) => { telemetry.log(event, data) })
   if (sessions !== undefined) sessions.start()
+
+  /**
+   * Run one Sessions-tree mutation against the live backend. Failures land in
+   * the window and the output log instead of vanishing into a repainted tree.
+   * @param label - Short action name used in the failure message.
+   * @param run - The mutation, given the proxy origin and the pinned workspace.
+   */
+  const runSessionMutation = async (
+    label: string,
+    run: (origin: string, workspaceId: string | undefined) => Promise<void>,
+  ): Promise<void> => {
+    const origin = runtime?.origin
+    if (origin === undefined) {
+      void vscode.window.showWarningMessage('DSH Sidebar: the agent runtime is still starting.')
+      return
+    }
+    try {
+      await run(origin, sessions?.workspaceId)
+      // The page republishes the workspace order after its own feed update; this
+      // read keeps the tree honest when the webview is closed or lagging.
+      void sessions?.refresh()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      telemetry.log('sessions.mutation-failed', { label, message: detail })
+      output.appendLine(`[sessions] ${label} failed: ${detail}`)
+      void vscode.window.showWarningMessage(`DSH Sidebar: ${label} failed: ${detail}`)
+    }
+  }
+
+  /** Move one Session to a new place in the workspace's manual order. */
+  const moveSession = async (sessionId: string, beforeSessionId: string | undefined): Promise<void> => {
+    const workspaceId = sessions?.workspaceId
+    if (workspaceId === undefined) return
+    await runSessionMutation('reorder', async origin => {
+      await moveSessionBefore(origin, workspaceId, sessionId, beforeSessionId)
+      telemetry.log('sessions.move', { sessionId, before: beforeSessionId ?? null })
+    })
+  }
+
   let provider: DshWebviewProvider
   provider = new DshWebviewProvider(context, runtime, folder, message => {
     handleBridgeMessage(
@@ -1644,7 +1773,7 @@ export function activate(context: vscode.ExtensionContext): void {
       value => { provider.post(value as Record<string, unknown>) },
       (event, data) => { telemetry.log(event, data) },
       () => { provider.markBridgeReady() },
-      (ids) => { sessions?.updateWorkspaceSessions(ids) },
+      (state) => { sessions?.updateWorkspaceState(state) },
       () => { void sessions?.refresh() },
     )
   }, (event, data) => { telemetry.log(event, data) }, output)
@@ -1680,7 +1809,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // The bridge only reports pushes from this page's own backend; another DSH
     // process writing the shared Session store is invisible until this read.
     vscode.window.onDidChangeWindowState(state => { if (state.focused) void sessions?.refresh() }),
-    vscode.window.createTreeView('dsh.embed.sessions', { treeDataProvider: sessions ?? new SessionsProvider(() => undefined) }),
+    vscode.window.createTreeView('dsh.embed.sessions', {
+      treeDataProvider: sessions ?? new SessionsProvider(() => undefined),
+      ...(sessions === undefined ? {} : { dragAndDropController: new SessionOrderController(sessions, moveSession) }),
+    }),
     vscode.window.registerWebviewViewProvider('dsh.embed.view', provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
@@ -1696,6 +1828,25 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('dsh.embed.refreshSessions', async () => {
       await sessions?.refresh()
+    }),
+    vscode.commands.registerCommand('dsh.embed.moveSessionUp', async (node?: SessionNode) => {
+      if (node === undefined) return
+      const plan = planStep(sessions?.displayedIds ?? [], node.sessionId, -1)
+      if (plan === undefined) return
+      await moveSession(node.sessionId, plan.beforeSessionId)
+    }),
+    vscode.commands.registerCommand('dsh.embed.moveSessionDown', async (node?: SessionNode) => {
+      if (node === undefined) return
+      const plan = planStep(sessions?.displayedIds ?? [], node.sessionId, 1)
+      if (plan === undefined) return
+      await moveSession(node.sessionId, plan.beforeSessionId)
+    }),
+    vscode.commands.registerCommand('dsh.embed.archiveSession', async (node?: SessionNode) => {
+      if (node === undefined) return
+      await runSessionMutation('archive', async origin => {
+        await archiveSession(origin, node.sessionId)
+        telemetry.log('command.archiveSession', { sessionId: node.sessionId })
+      })
     }),
     vscode.commands.registerCommand('dsh.embed.newSession', async () => {
       if (runtime === undefined || folder === undefined) {
