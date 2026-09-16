@@ -3,6 +3,28 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## 0.3.13
+
+### Changed
+
+- DSH now belongs to its Extension Host. SSH disconnection keeps the existing backend;
+  Extension Host exit closes an inherited IPC channel and an independent guardian reaps DSH.
+- A kernel-owned loopback listener reserves each canonical workspace until cleanup finishes.
+  A replacement Host waits for the old runtime instead of starting another backend on a random port.
+  Two live windows on the same workspace now report ownership contention instead of competing for session locks.
+- Shutdown allows eight seconds for graceful disposal before escalation. Linux cleanup also tracks
+  observed descendants that create their own process groups. A surviving Host handles guardian failure.
+- Shell heartbeats update in-memory status instead of synchronously appending to shared telemetry.
+
+### Fixed
+
+- Startup cancellation, authentication failure, concurrent restart and disposal no longer leave an
+  unowned backend or publish a stale generation. Disposed runtimes cannot restart.
+- Launch URLs split across stdout chunks are assembled before authentication. Startup buffers and
+  IPC log queues are bounded, and authentication has a deadline.
+- Proxy teardown explicitly closes WebSocket and upstream connections as well as pending HTTP requests.
+- The packaged guardian and real CLI lifecycle are exercised by `npm run smoke`.
+
 ## 0.3.12
 
 ### Added

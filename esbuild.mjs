@@ -6,13 +6,13 @@ copyFileSync('src/bridge.js', 'dist/bridge.js')
 
 /** Shared build options for the extension host bundle. */
 const options = {
-  entryPoints: ['src/extension.ts'],
+  entryPoints: ['src/extension.ts', 'src/runtime-guardian.ts'],
   bundle: true,
   platform: 'node',
   format: 'cjs',
   target: ['node20'],
   external: ['vscode'],
-  outfile: 'dist/extension.js',
+  outdir: 'dist',
   sourcemap: true,
   logLevel: 'info',
 }
