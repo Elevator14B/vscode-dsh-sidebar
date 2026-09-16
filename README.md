@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/Elevator14B/vscode-dsh-sidebar/actions/workflows/ci.yml/badge.svg)](https://github.com/Elevator14B/vscode-dsh-sidebar/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/Elevator14B/vscode-dsh-sidebar)](https://github.com/Elevator14B/vscode-dsh-sidebar/releases/latest)
-[![license](https://img.shields.io/github/license/Elevator14B/vscode-dsh-sidebar)](LICENSE)
+[![license](https://img.shields.io/github/license/Elevator14B/vscode-dsh-sidebar?style=flat)](LICENSE)
 
 Embed the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) web agent in a VS Code
 sidebar webview, pinned to the current workspace folder. It drives the open-source `dsh` CLI you install
