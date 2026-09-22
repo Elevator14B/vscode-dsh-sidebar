@@ -7,7 +7,7 @@ change so we can agree on the shape first.
 
 ```sh
 git clone https://github.com/Elevator14B/vscode-dsh-sidebar.git
-cd dsh-sidebar
+cd vscode-dsh-sidebar
 npm ci
 npm install -g @deepseek-ai/dsh   # the runtime the extension drives
 npm run typecheck
