@@ -1,7 +1,6 @@
 /** Standalone guardian: IPC EOF means Extension Host death, never SSH disconnect. */
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { Server } from 'node:net'
-import { evaluateDshVersion } from './dsh-version'
 import { claimWorkspace } from './runtime-ownership'
 import { ProcessTree } from './process-tree'
 import { OUTPUT_LIMIT, type GuardianCommand, type GuardianEvent, type LaunchSpec } from './runtime-protocol'
@@ -57,9 +56,9 @@ function stop(): Promise<void> {
   return stopping
 }
 
-async function run(spec: LaunchSpec, probe: boolean): Promise<string> {
+async function run(spec: LaunchSpec): Promise<string> {
   abort.signal.throwIfAborted()
-  const spawned = spawn(spec.command, probe ? ['--version'] : [...spec.args], {
+  const spawned = spawn(spec.command, [...spec.args], {
     cwd: spec.cwd, env: spec.env, detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
@@ -81,16 +80,16 @@ async function run(spec: LaunchSpec, probe: boolean): Promise<string> {
     }
     const cancelled = (): void => { finish(new Error('Runtime startup cancelled')) }
     abort.signal.addEventListener('abort', cancelled, { once: true })
-    const timer = setTimeout(() => { finish(new Error(`dsh ${probe ? 'version probe' : 'startup'} timed out\n${output}`)) }, probe ? 15_000 : 90_000)
+    const timer = setTimeout(() => { finish(new Error(`dsh startup timed out\n${output}`)) }, 90_000)
     spawned.stdout.setEncoding('utf8')
     spawned.stderr.setEncoding('utf8')
     const record = (text: string): void => {
       output = (output + text).slice(-OUTPUT_LIMIT)
-      if (!probe) report({ type: 'log', text })
+      report({ type: 'log', text })
     }
     spawned.stdout.on('data', (text: string) => {
       record(text)
-      if (settled || probe) return
+      if (settled) return
       stdout = (stdout + text).slice(-OUTPUT_LIMIT)
       // Wait for a delimiter: accepting a partial token at a chunk boundary
       // consumes the one-time authentication token with the wrong value.
@@ -100,7 +99,6 @@ async function run(spec: LaunchSpec, probe: boolean): Promise<string> {
     spawned.stderr.on('data', record)
     spawned.once('error', error => { finish(error) })
     spawned.once('exit', (code, signal) => {
-      if (probe) { finish(undefined, output); return }
       const error = new Error(`dsh web exited code=${String(code)} signal=${String(signal)}\n${output}`)
       if (!settled) finish(error)
       else if (!abort.signal.aborted) {
@@ -125,20 +123,10 @@ async function start(spec: LaunchSpec): Promise<void> {
     })
   }
   abort.signal.throwIfAborted()
-  let versionOutput: string
-  try { versionOutput = await run(spec, true) } catch (error) {
-    abort.signal.throwIfAborted()
-    // A custom executable may not support --version, but it still needs to be
-    // reaped before launching the real command.
-    report({ type: 'log', text: `[runtime] version probe failed: ${String(error)}\n` })
-    versionOutput = ''
-  }
-  await stopChild()
-  abort.signal.throwIfAborted()
-  const gate = evaluateDshVersion(versionOutput)
-  report({ type: 'version', ...gate })
-  if (!gate.ok) throw new Error(gate.message)
-  const url = await run(spec, false)
+  // The CLI is launched directly: a 'dsh --version' probe would only add a
+  // second boot, and a CLI that cannot serve 'dsh web' fails with its own
+  // message, which the failure path reports verbatim.
+  const url = await run(spec)
   abort.signal.throwIfAborted()
   report({ type: 'url', url, pid: child!.pid! })
 }

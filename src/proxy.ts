@@ -24,7 +24,7 @@ export interface BridgeConfig {
   readonly theme: 'light' | 'dark'
   /** VS Code display language (`vscode.env.language`), for bridge-owned chrome. */
   readonly locale: string
-  /** Identity checked by the page after remote forwarding reconnects. */
+  /** Identity reported by the loopback health route, for diagnosis only. */
   readonly runtimeId?: string
 }
 
@@ -65,6 +65,7 @@ function copyResponseHeaders(headers: Record<string, string | string[] | undefin
 export class DshBridgeProxy {
   private server: Server | undefined
   private port = 0
+  private binding: Promise<number> | undefined
   private closing: Promise<void> | undefined
   private readonly sockets = new Set<Duplex>()
   private readonly requests = new Set<ReturnType<typeof httpRequest>>()
@@ -87,6 +88,7 @@ export class DshBridgeProxy {
   /** Bind the proxy on a loopback port. */
   listen(requestedPort = 0): Promise<number> {
     if (this.closing !== undefined) return Promise.reject(new Error('DSH proxy is closing'))
+    if (this.binding !== undefined) return this.binding
     if (this.server !== undefined) return Promise.resolve(this.port)
     this.server = createServer((req, res) => {
       if (this.closing !== undefined) { req.destroy(); return }
@@ -97,7 +99,9 @@ export class DshBridgeProxy {
     })
     this.server.on('connection', socket => { this.track(socket) })
     this.server.on('upgrade', (req, socket, head) => { this.upgrade(req, socket as Duplex, head) })
-    return this.listenOn(requestedPort)
+    const binding = this.listenOn(requestedPort).finally(() => { if (this.binding === binding) this.binding = undefined })
+    this.binding = binding
+    return binding
   }
 
   private listenOn(requestedPort: number): Promise<number> {
@@ -120,6 +124,25 @@ export class DshBridgeProxy {
         resolve(this.port)
       })
     })
+  }
+
+  /**
+   * Drop the current listener and bind a fresh loopback port.
+   *
+   * Only a client-side forward VS Code created for an authority it has never
+   * resolved can survive a dropped tunnel, so an unreachable page is rebuilt on
+   * a new port instead of the same cached one.
+   * @param requestedPort - 0 binds an ephemeral port.
+   * @returns the new port.
+   */
+  async relisten(requestedPort = 0): Promise<number> {
+    const server = this.server
+    this.server = undefined
+    this.port = 0
+    for (const request of this.requests) request.destroy()
+    for (const socket of this.sockets) socket.destroy()
+    if (server !== undefined) await new Promise<void>(resolve => { server.close(() => { resolve() }) })
+    return this.listen(requestedPort)
   }
 
   /** Stable origin for logs and cookie authority. */
@@ -162,6 +185,8 @@ export class DshBridgeProxy {
       res.end(body)
       return
     }
+    // Diagnostic only: the host no longer probes the page, but this is how a
+    // stale proxy from an older generation is told apart from a live one.
     if (pathname === '/__dsh_vscode_health') {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify({ protocol: 'dsh-sidebar-health-v1', runtimeId: this.config.runtimeId }))

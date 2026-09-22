@@ -259,6 +259,7 @@ const posts = []
 let receive
 const view = {
   onDidDispose() {},
+  onDidChangeVisibility() {},
   webview: {
     cspSource: 'vscode-webview:',
     onDidReceiveMessage(callback) { receive = callback },

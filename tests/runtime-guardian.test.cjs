@@ -48,7 +48,7 @@ function launch(t, cwd, env = {}) {
   })
   return {
     host, events, pids,
-    async event(type) { await until(() => events.some(e => e.type === type)); return events.find(e => e.type === type) },
+    async event(type, ms = 12000) { await until(() => events.some(e => e.type === type), ms); return events.find(e => e.type === type) },
   }
 }
 
@@ -82,29 +82,28 @@ test('a live Host keeps its backend without browser connections or heartbeats', 
   await delay(1000)
   assert.ok(live(ready.pid))
   assert.equal((await fetch(ready.url)).status, 200)
-  assert.equal(owner.pids().filter(p => !p.probe).length, 1)
+  assert.equal(owner.pids().length, 1)
   owner.host.send({ type: 'stop' })
   await owner.event('guardian-exit')
   assert.ok(!live(ready.pid))
 })
 
-test('Host death during version probe never launches the backend', { skip: process.platform === 'win32', timeout: 12000 }, async t => {
-  const owner = launch(t, workspace(t), { FIXTURE_MODE: 'hang-version' })
+test('Host death during startup still reaps the backend', { skip: process.platform === 'win32', timeout: 12000 }, async t => {
+  const owner = launch(t, workspace(t), { FIXTURE_MODE: 'never-ready' })
   await until(() => owner.pids().length > 0)
   owner.host.kill('SIGKILL')
   await until(() => owner.pids().every(p => !live(p.pid)))
-  assert.ok(owner.pids().every(p => p.probe))
 })
 
-test('replacement waits for the previous guardian and a SIGTERM-resistant backend', { skip: process.platform !== 'linux', timeout: 20000 }, async t => {
+test('replacement waits for the previous guardian and a SIGTERM-resistant backend', { skip: process.platform !== 'linux', timeout: 60000 }, async t => {
   const cwd = workspace(t)
   const first = launch(t, cwd, { FIXTURE_IGNORE_TERM: '1' })
   const before = await first.event('url')
   first.host.kill('SIGKILL')
   const next = launch(t, cwd)
   await delay(250)
-  assert.equal(next.pids().length, 0, 'replacement must not even probe while old workspace is reserved')
-  const after = await next.event('url')
+  assert.equal(next.pids().length, 0, 'replacement must not start while the old workspace is reserved')
+  const after = await next.event('url', 50000)
   assert.ok(!live(before.pid))
   assert.notEqual(before.pid, after.pid)
 })

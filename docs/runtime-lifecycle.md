@@ -7,9 +7,11 @@ backend and resumes persisted sessions. In-flight execution is not transferred a
 ## Process and connection ownership
 
 `DshRuntime` starts the packaged `runtime-guardian.js` with a private Node IPC channel. The guardian
-runs the version probe and DSH, consumes their output, and watches IPC EOF. It does not use a browser
-heartbeat, SSH state, a PID-file timeout or an inactivity timer to decide when the owner has exited.
-Normal `deactivate()` awaits shutdown; abrupt Host death closes IPC and invokes the same guardian path.
+launches the configured command directly — there is no `dsh --version` probe — consumes its output, and
+watches IPC EOF. A CLI that cannot serve `dsh web` fails with its own exit output. The guardian does not
+use a browser heartbeat, SSH state, a PID-file timeout or an inactivity timer to decide when the owner has
+exited. Normal `deactivate()` awaits shutdown; abrupt Host death closes IPC and invokes the same guardian
+path.
 
 The guardian creates a separate POSIX process group for each command. Linux snapshots record PID and
 start time for descendants, including observed descendants that subsequently detach. Shutdown requests
@@ -29,7 +31,7 @@ candidate port is derived from SHA-256, in 44000–59999; up to eight candidates
 with other verified Sidebar workspace reservations. The listener exposes only a protocol identifier,
 workspace hash and owner PID. Control operations are accepted only over the inherited IPC channel.
 
-The reservation is taken before version probing. A new Host waits up to 15 seconds for an existing
+The reservation is taken before the command is launched. A new Host waits up to 15 seconds for an existing
 reservation to close. If the other Host remains alive, startup reports that workspace's owner rather
 than creating another writer backend. An unresponsive or unrecognized reservation fails closed. The
 kernel releases the listener when its final owner closes or dies; there is no stale lock file on shared
@@ -49,10 +51,10 @@ Concurrent starts share a promise; concurrent restarts share one stop/start oper
 aborts the current generation. Every later await checks cancellation before publishing ready. Failures
 reap the guardian and close the proxy before a generation can be replaced. Disposal is terminal.
 
-The version probe has a 15-second deadline, URL discovery 90 seconds, authentication 10 seconds, and
-the overall guardian handshake 150 seconds. Launch tokens are assembled across stdout chunks and
-accepted only after a delimiter. Diagnostic tails and pending IPC log output are bounded at 64 KiB.
-The guardian keeps consuming output when the Host is busy and drops excess log delivery, not backend work.
+URL discovery has a 90-second deadline, authentication 10 seconds, and the overall guardian handshake
+150 seconds. Launch tokens are assembled across stdout chunks and accepted only after a delimiter.
+Diagnostic tails and pending IPC log output are bounded at 64 KiB. The guardian keeps consuming output
+when the Host is busy and drops excess log delivery, not backend work.
 
 The proxy tracks incoming and outgoing sockets and pending HTTP requests. Close rejects new use and
 destroys both sides of upgraded WebSockets; repeated closes join the same promise. Authentication and
@@ -64,17 +66,15 @@ that wait; its guardian and workspace reservation remain, so a retry cannot star
 
 ## Page connection recovery
 
-Page recovery never signals the guardian, changes workspace ownership or retries a prompt. The Agent toolbar refresh reloads only the webview; backend restart remains a separately named command that interrupts running tasks. Reloading a page may discard unsent drafts, so automatic recovery does not replace the iframe.
+One host-side ladder owns every repair decision. The injected `connection-recovery.js` only reports DSH's own `connection.state` and answers a host `reconnect-page` request with `connection.reconnect()`; it keeps no timer and no threshold. The local `recovery-shell.js` posts `shell-alive` every three seconds, relays messages, and renders the status text the host sends; the banner has no buttons and its wording is localised in the shell.
 
-The local shell sends an Extension Host round trip every three seconds. Ten seconds without a recent matching reply shows an extension-connection warning; delayed buffered replies cannot mark the connection restored. Fresh replies after a gap request forwarding resolution and DSH reconnection. Each page has an identity, and Host handlers reject replies or messages belonging to replaced pages.
+`DshWebviewProvider` runs the ladder every three seconds (`MAINTAIN_INTERVAL_MS`) while the Agent view is resolved. When the runtime has no origin, or its origin is no longer the one the page was rendered against, the ladder loads the page again — starting the runtime when it is absent — at most once per fifteen seconds (`RESTART_BACKOFF_MS`); a runtime that is still starting is left to finish. Nothing is running in that state, so a silent client does not pause it: a failed start is retried until it succeeds. With a live runtime at the rendered origin, a webview that has not sent `shell-alive` for twelve seconds (`CLIENT_STALE_MS`) is asleep or disconnected: the ladder publishes "waiting for the remote connection" and takes no other action, so a silent client never restarts an agent that may still be working. Otherwise it gives the page twelve seconds (`PAGE_BOOT_MS`) to install its bridge, asks the page to reconnect once, and then rebuilds the webview on a fresh loopback authority, at most once per fifteen seconds (`REBUILD_INTERVAL_MS`). After three rebuilds that still never report DSH `connected`, the backend is restarted instead (`MAX_REBUILDS`, `MAX_AUTO_RESTARTS`), because a page that cannot connect is then the wrong suspect. A bridge that reports DSH `connected` clears the counters and hides the banner. Backend restart remains the separate, explicit **DSH Sidebar: Restart Agent Runtime (Interrupts Running Tasks)** command.
 
-The injected bridge subscribes to DSH's public `connection.state` and the selected Session snapshot. History loading for 15 seconds displays a timeout independently of the connection's reported state. An unhealthy episode first requests `connection.reconnect()`, then requests forwarding resolution and another reconnect. Automatic attempts are bounded at two, at least ten seconds apart. Restored data/history readiness clears the episode. Manual reconnect can start another attempt.
+A rebuild rotates only the browser-facing proxy: `rotateOrigin` calls `relisten`, which drops the current listener and its sockets and binds a port VS Code has never resolved, then the webview is re-rendered with a new page identity. That is what repairs a forward whose tunnel died while `asExternalUri` kept answering with the same local URL; the backend process and its port stay untouched. The host reopens the session it last opened through the tree; state that lived only in the replaced document is not preserved, and a session selected inside the page itself is restored by DSH's own boot state. Each render resolves its forwarded authority with `asExternalUri` under a fifteen-second deadline, and the ladder retries later when that fails. The transport itself is outside the extension's control: a rebuild repairs the forward VS Code is caching, not an unhealthy SSH connection.
 
-A same-origin health request checks the proxy protocol and runtime identity every twelve seconds at the three-second tick cadence, with a four-second deadline. During recovery the same bounded probe also reads `session/list` to distinguish proxy reachability from backend response. Forwarding resolution uses `asExternalUri`, coalesces concurrent calls for the same origin and times out after eight seconds. This asks VS Code to establish or reuse a tunnel; the extension cannot force an unhealthy SSH transport to recover. A changed forwarded origin asks the user to reload the page.
+Showing the view and focusing the window call `wake()`, which clears the backoff and runs the ladder immediately. **DSH Sidebar: Recover Connection** rebuilds the page unconditionally — it is the user saying the page is wrong, so it does not wait for a health signal a frozen page can no longer send. Startup failures render a short diagnosis with no buttons; the ladder starts the runtime again without waiting for a user wake. Page identity scopes every message: handlers reject messages and status for any other page.
 
-The shell shows recovery actions when a page does not report bridge health, the data connection is down or history is slow. Selecting several sessions in a reconnect burst opens only the last selection; selections received while DSH is disconnected remain coalesced until its connection returns. New-session requests while disconnected report an error instead of accumulating creation operations. Prompt admission remains DSH-owned: recovery does not resend messages, and the disconnected banner asks users to check history before resending an unconfirmed submission.
-
-`history-state` records loading, open and error states separately from `open-session-received`. Trace rows carry Host PID, workspace and runtime identity; page messages carry page identity and session events include the session id. Periodic connection snapshots and shell heartbeats update memory, while changes enter the trace. These are UI health signals, never backend ownership signals.
+The ladder never stops a running backend, changes workspace ownership or resends a prompt. The bridge refuses a new-session request while DSH reports itself disconnected, and queued session opens coalesce to the latest request until the connection returns. `webview.status` and `webview.connection-changed` enter the trace; shell liveness updates `lastHeartbeatAt` in memory only. Trace rows carry Host PID, workspace and runtime identity, and page messages carry page identity. These are UI health signals, never backend ownership signals.
 
 ## Scope and migration
 
@@ -92,11 +92,19 @@ lock files. Reloading the extension creates the new lifecycle; it does not trans
 
 `tests/runtime-guardian.test.cjs` kills real owner processes, exercises delayed SIGKILL escalation,
 and verifies release of a real flock held by an observed detached descendant. `runtime-lifecycle.test.cjs`
-exercises the actual packaged guardian through `DshRuntime`, including authentication failure, cancellation,
-concurrent restart and guardian crash. `proxy-lifecycle.test.cjs` holds real WebSocket and HTTP connections
-open during teardown. `npm run smoke` exercises the installed DSH CLI through the guardian and proxy.
+drives the actual packaged guardian through `DshRuntime`: one child per generation with no version probe,
+authentication failure, cancellation during startup, concurrent restart and guardian crash.
+`proxy-lifecycle.test.cjs` holds real WebSocket and HTTP connections open during teardown and verifies that
+`relisten` binds a fresh port and drops the old listener. `npm run smoke` exercises the installed DSH CLI
+through the guardian and proxy.
 
-`connection-recovery.test.cjs` exercises deadlines, bounded recovery, stale proxy identities, obsolete session observers, EH reply freshness and buffered selections with a controlled clock. `webview-recovery.test.cjs` tests page generations, concurrent forwarding and delayed replies. `npm run smoke:recovery` uses the installed DSH and Playwright Chromium to disconnect the data channel and delay history while checking that one backend generation survives; run `npx playwright install chromium` first. `DSH_CHROMIUM_PATH` optionally selects an existing browser.
+`connection-recovery.test.cjs` checks, with a controlled clock, that the injected page module only reports
+DSH state and reconnects when asked, that the shell renders host status and relays both directions, and
+that it reports liveness on every tick. `webview-recovery.test.cjs` drives the host ladder: rebuild on a
+fresh authority, a connected page left alone, a silent client pausing recovery, immediate repair when the
+view is shown again, a booting runtime left to start, session restore after a rebuild and status replay to
+a fresh shell. The end-to-end recovery smoke was retired with the button-driven shell it drove; the ladder
+above is covered by the two unit suites, and browser acceptance of the transport remains an editor check.
 
 Actual Remote SSH disconnect/reconnect and Extension Host replacement remain editor acceptance checks;
 the process tests do not claim to reproduce VS Code's transport implementation.

@@ -42,9 +42,16 @@ export async function claimWorkspace(cwd: string, signal: AbortSignal): Promise<
         await delay(50, undefined, { signal })
         continue
       }
-      // An unknown listener might be a wedged guardian. Never skip it and create
-      // a second writer; a successful identity exchange is required to skip a hash collision.
-      if (owner === undefined) throw new Error(`Cannot verify DSH workspace owner on port ${port}. Retry after the previous runtime exits.`)
+      // An unknown listener might be a wedged guardian, or the previous owner
+      // mid-teardown answering a reset instead of its identity. Never skip it
+      // and create a second writer, but keep polling the same port until the
+      // wait deadline: the common case is a window reload racing its
+      // predecessor's shutdown.
+      if (owner === undefined) {
+        if (Date.now() >= deadline) throw new Error(`Cannot verify DSH workspace owner on port ${port}. Retry after the previous runtime exits.`)
+        await delay(100, undefined, { signal })
+        continue
+      }
       if (owner.key !== key) break
       if (Date.now() >= deadline) {
         throw new Error(`This workspace is still owned by DSH Sidebar in Extension Host ${owner.hostPid}. Close that window or stop its runtime before retrying.`)

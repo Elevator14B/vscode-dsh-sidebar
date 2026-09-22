@@ -2,7 +2,7 @@
   "name": "dsh-sidebar",
   "displayName": "DSH Sidebar",
   "description": "VS Code sidebar for DeepSeek Harness: native session tree, file and diff navigation, drag-to-reference, clipboard and theme bridges.",
-  "version": "0.3.14",
+  "version": "0.4.0",
   "publisher": "Elevator14B",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -62,15 +62,10 @@
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "dsh.embed.refreshPage",
-        "title": "Reload Agent Page",
+        "command": "dsh.embed.recover",
+        "title": "Recover Connection",
         "category": "DSH Sidebar",
         "icon": "$(refresh)"
-      },
-      {
-        "command": "dsh.embed.reconnect",
-        "title": "Reconnect Agent",
-        "category": "DSH Sidebar"
       },
       {
         "command": "dsh.embed.restart",
@@ -204,7 +199,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "dsh.embed.refreshPage",
+          "command": "dsh.embed.recover",
           "when": "view == dsh.embed.view",
           "group": "navigation@1"
         }
@@ -256,16 +251,13 @@
     "test": "node --test tests/*.test.cjs",
     "smoke": "node scripts/smoke.js",
     "typecheck": "tsc --noEmit",
-    "presmoke": "node esbuild.mjs",
-    "presmoke:recovery": "node esbuild.mjs",
-    "smoke:recovery": "node scripts/smoke-recovery.cjs"
+    "presmoke": "node esbuild.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.96.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "^0.25.0",
-    "playwright": "1.61.1",
     "typescript": "^5.7.2"
   }
 }

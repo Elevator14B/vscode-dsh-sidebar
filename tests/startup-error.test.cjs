@@ -2,7 +2,6 @@ const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
 const path = require('node:path')
 const { test } = require('node:test')
-const { runInNewContext } = require('node:vm')
 const { buildSync } = require('esbuild')
 
 // Exercise the real provider without starting an extension host or DSH backend.
@@ -20,11 +19,8 @@ const code = buildSync({
   write: false,
 }).outputFiles[0].text
 
-function fixture(outcomes, { clipboardFails = false } = {}) {
-  const copied = []
-  const logs = []
-  const warnings = []
-  const shown = []
+/** One provider whose runtime fails, succeeds, or hangs per outcome list. */
+function fixture(outcomes) {
   const events = []
   let starts = 0
   let receive
@@ -34,53 +30,51 @@ function fixture(outcomes, { clipboardFails = false } = {}) {
       joinPath: (uri, leaf) => ({ fsPath: path.join(uri.fsPath, leaf) }),
       parse: value => ({ scheme: new URL(value).protocol.slice(0, -1), authority: new URL(value).host, toString: () => value }),
     },
-    env: {
-      language: 'en',
-      clipboard: { writeText: async text => {
-        if (clipboardFails) throw new Error('clipboard unavailable')
-        copied.push(text)
-      } },
-      asExternalUri: async uri => uri,
-    },
-    window: {
-      showInformationMessage: async () => {},
-      showWarningMessage: async message => { warnings.push(message) },
-    },
+    env: { language: 'en', asExternalUri: async uri => uri },
+    window: { showInformationMessage: async () => {}, showWarningMessage: async () => {} },
   }
   const module = { exports: {} }
   new Function('require', 'module', 'exports', code)(name => name === 'vscode' ? vscode : require(name), module, module.exports)
   const { DshWebviewProvider, summarizeStartupError } = module.exports
   const runtime = {
+    origin: undefined,
     onDidChange: () => {},
-    getWebUrl: () => {
+    getWebUrl: async () => {
       const value = outcomes[Math.min(starts++, outcomes.length - 1)]
-      return value instanceof Error ? Promise.reject(value) : Promise.resolve(value)
+      if (value instanceof Error) throw value
+      runtime.origin = value
+      return value
     },
   }
-  const view = { onDidDispose() {}, webview: {
-    cspSource: 'vscode-webview:',
-    onDidReceiveMessage: callback => { receive = callback },
-    postMessage: async () => {},
-  } }
-  const output = { appendLine: line => logs.push(line), show: preserveFocus => shown.push(preserveFocus) }
+  const view = {
+    onDidDispose() {},
+    onDidChangeVisibility() {},
+    webview: {
+      cspSource: 'vscode-webview:',
+      onDidReceiveMessage: callback => { receive = callback },
+      postMessage: async () => {},
+    },
+  }
   const provider = new DshWebviewProvider(
     { extensionUri: { fsPath: path.resolve(__dirname, '..') }, subscriptions: [] },
     runtime,
     { uri: { fsPath: '/workspace' }, name: 'workspace' },
     () => {},
     (event, data) => events.push({ event, data }),
-    output,
   )
   return {
-    provider, view, copied, logs, warnings, shown, events, summarizeStartupError,
+    provider, runtime, view, events, summarizeStartupError,
     starts: () => starts,
-    send: type => receive({ source: 'dsh-vscode-startup-error', type }),
+    send: message => receive(message),
+    /** Run the maintenance pass the way the host timer would. */
+    maintain: () => { provider.lastActionAt = 0; provider.maintain() },
   }
 }
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
+const settle = () => new Promise(resolve => setTimeout(resolve, 25))
 
-test('large missing-bundle errors stay out of HTML but remain fully copyable and logged', async () => {
+test('a startup failure renders one bounded, escaped diagnosis and keeps the full message', async () => {
   const message = 'dsh web exited before ready (code 1, signal null)\nError: client bundles not found\n' + 'nested stack trace\n'.repeat(5000)
   const f = fixture([new Error(message)])
   f.provider.resolveWebviewView(f.view)
@@ -90,49 +84,49 @@ test('large missing-bundle errors stay out of HTML but remain fully copyable and
   assert.ok(f.view.webview.html.length < 6000)
   assert.ok(!f.view.webview.html.includes('nested stack trace'))
   assert.equal(f.events.find(row => row.event === 'webview.start-failed').data.message, message)
-  await f.send('copy-error')
-  assert.deepEqual(f.copied, [message])
-  await f.send('open-log')
-  assert.deepEqual(f.shown, [true])
-
-  const handlers = new Map()
-  const posts = []
-  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(f.view.webview.html)[1]
-  runInNewContext(script, {
-    acquireVsCodeApi: () => ({ postMessage: message => posts.push(message) }),
-    document: { getElementById: id => ({ addEventListener: (event, callback) => handlers.set(id, callback) }) },
-  })
-  for (const id of ['copy-error', 'open-log', 'retry']) handlers.get(id)()
-  assert.deepEqual(posts.map(message => message.type), ['copy-error', 'open-log', 'retry'])
-  assert.ok(posts.every(message => message.source === 'dsh-vscode-startup-error'))
+  // No action is offered: the maintenance pass retries on its own.
+  assert.ok(!f.view.webview.html.includes('copy-error'))
+  assert.ok(!f.view.webview.html.includes('open-log'))
+  assert.ok(!f.view.webview.html.includes('acquireVsCodeApi'))
 })
 
-test('retry can fail again, then recover without stale error actions', async () => {
-  const f = fixture([new Error('first failure'), new Error('second failure'), 'http://127.0.0.1:39222/'])
+test('a failed startup is retried automatically until the runtime starts', async () => {
+  const f = fixture([new Error('first failure'), 'http://127.0.0.1:39222/'])
   f.provider.resolveWebviewView(f.view)
   await flush()
-  await f.send('retry')
+  assert.match(f.view.webview.html, /first failure/)
+  f.maintain()
   await flush()
-  assert.match(f.view.webview.html, /second failure/)
-  await f.send('copy-error')
-  assert.deepEqual(f.copied, ['second failure'])
-  await f.send('retry')
-  await flush()
+  await settle()
+  assert.equal(f.starts(), 2)
   assert.match(f.view.webview.html, /<iframe id="frame"/)
-  assert.ok(!f.view.webview.html.includes('second failure'))
-  await f.send('copy-error')
-  await f.send('retry')
-  assert.equal(f.starts(), 3)
-  assert.equal(f.copied.length, 1)
+  assert.ok(!f.view.webview.html.includes('first failure'))
+  assert.ok(String(f.runtime.origin).startsWith('http://127.0.0.1:39222'))
 })
 
-test('clipboard failures open the log and tell the user how to copy', async () => {
-  const f = fixture([new Error('startup failure')], { clipboardFails: true })
+test('a failed start is retried even when the client has been silent', async () => {
+  const f = fixture([new Error('first failure'), 'http://127.0.0.1:39222/'])
   f.provider.resolveWebviewView(f.view)
   await flush()
-  await f.send('copy-error')
-  assert.deepEqual(f.shown, [true])
-  assert.match(f.warnings[0], /could not copy/)
+  // The error page carries no shell script, so no liveness can arrive from it.
+  f.provider.lastAliveAt = Date.now() - 60_000
+  f.provider.lastActionAt = Date.now() - 60_000
+  f.provider.maintain()
+  await flush()
+  await settle()
+  assert.equal(f.starts(), 2, 'a dead runtime must be started again without a user wake')
+  assert.match(f.view.webview.html, /<iframe id="frame"/)
+})
+
+test('a repeated failure keeps retrying without any page message', async () => {
+  const f = fixture([new Error('boom'), new Error('boom'), new Error('boom')])
+  f.provider.resolveWebviewView(f.view)
+  await flush()
+  for (let pass = 0; pass < 3; pass += 1) { f.maintain(); await flush() }
+  assert.equal(f.starts(), 4, 'every maintenance pass after the backoff starts the runtime again')
+  await f.send({ source: 'dsh-vscode-startup-error', type: 'retry' })
+  await flush()
+  assert.equal(f.starts(), 4, 'the removed error page action no longer exists')
 })
 
 test('unknown errors have a bounded, escaped diagnosis', async () => {

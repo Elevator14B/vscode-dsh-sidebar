@@ -12,8 +12,8 @@ const path = require('node:path')
 const { test } = require('node:test')
 const { buildSync } = require('esbuild')
 
-// In-memory bundle, the loader tests/dsh-version.test.cjs uses: the real module,
-// no build step, nothing written next to the sources.
+// In-memory bundle of the real module: no build step, nothing written next to
+// the sources.
 const code = buildSync({
   entryPoints: [path.resolve(__dirname, '../src/session-actions.ts')],
   bundle: true,

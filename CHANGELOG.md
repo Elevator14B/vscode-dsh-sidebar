@@ -3,6 +3,38 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## 0.4.0
+
+### Changed
+
+- The runtime launches the configured command directly (`dsh web --port N --no-open`). The `dsh --version`
+  probe, `src/dsh-version.ts` and the minimum-version gate are gone; a CLI that cannot serve `dsh web`
+  fails with its own message on the Agent view's startup page and in the **DSH Sidebar** output channel.
+- Connection maintenance is one ladder in the Extension Host, driven by `MAINTAIN_INTERVAL_MS` (three
+  seconds). A live runtime is repaired by rebuilding the page on a fresh loopback authority
+  (`rotateOrigin` → `relisten`); a runtime that is gone is started again, at most once per
+  `RESTART_BACKOFF_MS` (fifteen seconds).
+- A webview that stops sending `shell-alive` for `CLIENT_STALE_MS` (twelve seconds) pauses the page
+  ladder once a page is rendered, so a sleeping window cannot make the extension restart an agent that is
+  still working; a runtime that is absent or unrendered is still started again without a user wake. Showing
+  the view and focusing the window clear the backoff and repair immediately, and **DSH Sidebar: Recover
+  Connection** always rebuilds the page.
+- A page that reports DSH `connected` clears the ladder. Three rebuilds that still never connect restart
+  the backend instead (`MAX_REBUILDS`, `MAX_AUTO_RESTARTS`), so a wedged-but-listening backend cannot leave
+  the view rebuilding forever.
+- The connection banner has no buttons: it renders host-supplied status text, localised in
+  `src/recovery-shell.js` (reconnecting, rebuilding the page, starting the runtime, waiting for the remote
+  connection). The startup error page keeps a selectable diagnosis and retries automatically.
+- The injected page module (`src/connection-recovery.js`) only reports DSH's own `connection.state` and
+  answers `reconnect-page`; its health probe, history observation, forwarding repair and retry ladder are
+  gone.
+
+### Added
+
+- **DSH Sidebar: Recover Connection** (`dsh.embed.recover`), also the Agent view title-bar icon, runs the
+  connection ladder immediately. It replaces **DSH Sidebar: Reload Agent Page** (`dsh.embed.refreshPage`)
+  and **DSH Sidebar: Reconnect Agent** (`dsh.embed.reconnect`), which are removed.
+
 ## 0.3.14
 
 ### Changed

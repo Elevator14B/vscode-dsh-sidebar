@@ -10,7 +10,8 @@ yourself.
 
 - Maintainer: [@Elevator14B](https://github.com/Elevator14B)
 - Environment: VS Code 1.96+, DSH `0.1.5-rc.1` or newer (tested with `0.1.5-rc.2`), Node.js 22+ on the
-  host's `PATH`
+  host's `PATH`. Those CLI versions are documentation, not a gate: the extension launches the configured
+  command directly and reports what it does.
 
 The extension starts a DSH web runtime (`dsh web`) with the first VS Code workspace folder as its working
 directory, proxies the authenticated page into a sidebar webview, and bridges the two sides: the page's own
@@ -58,8 +59,9 @@ the theme all live in VS Code natively.
   npm install -g @deepseek-ai/dsh
   ```
 
-The extension refuses to start against a CLI older than `0.1.5-rc.1` and prints the upgrade command. See
-[Compatibility](#compatibility).
+The extension launches the configured command directly — there is no pre-flight version check. A CLI that
+cannot serve `dsh web` fails with its own message on the Agent view's startup page and in the
+**DSH Sidebar** output channel. See [Compatibility](#compatibility).
 
 ## Install
 
@@ -96,11 +98,13 @@ Press <kbd>F5</kbd> in VS Code to launch an Extension Development Host.
 
 ## Compatibility
 
-DeepSeek Harness is in developer preview and does ship compatibility-breaking changes, so the extension
-probes the CLI version at startup (`src/dsh-version.ts`) and refuses to boot on a CLI it cannot drive.
+DeepSeek Harness is in developer preview and does ship compatibility-breaking changes. `0.1.5-rc.2` is the
+tested CLI and `0.1.5-rc.1` the documented minimum; neither is enforced. The extension no longer probes
+`dsh --version` (there is no `src/dsh-version.ts`) and never refuses a CLI before launching it.
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
+| 0.4.0 | `0.1.5-rc.2` tested, `0.1.5-rc.1` documented | Direct CLI launch without a version gate; one Extension Host connection ladder that rebuilds the page on a fresh forwarding authority. |
 | 0.3.14 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Extension Host ownership, page connection recovery and history timeout feedback. |
 | 0.3.12 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
 | 0.3.11 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | First public release on GitHub. |
@@ -121,8 +125,7 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 ## Commands
 
 - **DSH Sidebar: Open Agent**
-- **DSH Sidebar: Reload Agent Page** (Agent title bar refresh; keeps the backend running, but unsent page drafts may be lost)
-- **DSH Sidebar: Reconnect Agent** (repairs the connection without replacing the page)
+- **DSH Sidebar: Recover Connection** (Agent title bar icon; runs the connection ladder immediately)
 - **DSH Sidebar: Restart Agent Runtime (Interrupts Running Tasks)** (Command Palette)
 - **New Session** / **Refresh Sessions** (Sessions tree title bar)
 - **Move Session Up** / **Move Session Down** / **Archive Session** (session row context menu; dragging one row
@@ -132,23 +135,30 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 
 ## Architecture
 
-- `src/runtime.ts` — owns one cancellable backend generation and window proxy, and exchanges the
-  one-time launch token for the browser-session cookie inside the Extension Host.
-- `src/runtime-guardian.ts` — runs the version probe and DSH in a separate process, watches the owning
-  Host's IPC connection, and reaps DSH when that Host exits, including abrupt termination.
+- `src/runtime.ts` — owns one cancellable backend generation and window proxy, exchanges the one-time
+  launch token for the browser-session cookie inside the Extension Host, and rebinds the proxy to a fresh
+  loopback authority on demand (`rotateOrigin`).
+- `src/runtime-guardian.ts` — launches and supervises the configured command in a separate process, with
+  no `dsh --version` probe, watches the owning Host's IPC connection, and reaps DSH when that Host exits,
+  including abrupt termination.
 - `src/runtime-ownership.ts` / `src/process-tree.ts` — reserve the workspace until cleanup completes and
   terminate private process groups plus observed Linux descendants.
-- `src/proxy.ts` — loopback reverse proxy (HTTP + WebSocket) that injects the auth cookie, keeps a stable
-  same-origin authority, rewrites the boot theme to the VS Code theme, and serves the injected bridge script.
+- `src/proxy.ts` — loopback reverse proxy (HTTP + WebSocket) that injects the auth cookie, rewrites the
+  boot theme to the VS Code theme, serves the injected bridge script, and binds a fresh port when the page
+  must be rebuilt (`relisten`).
 - `src/bridge.js` — injected into the page: drains the DSH sidebar from the boot graph, pins the workspace,
   intercepts tool-path links, delivery cards and drag/drop references, drives the theme through the page's own
   ThemeRuntime, and relays the workspace order and archive set for the native tree.
+- `src/connection-recovery.js` — injected into the page: reports DSH's own `connection.state` and answers
+  the host's `reconnect-page` request; it owns no timers or thresholds.
+- `src/recovery-shell.js` — the local webview shell: reports `shell-alive` every three seconds, relays
+  messages, and renders the host's localised status banner.
 - `src/session-panel.ts` — native `TreeDataProvider` reading `session/list` through the proxy, in the manual
   order the page publishes and without archived rows.
 - `src/session-actions.ts` — the Workspace RPCs behind the tree's reorder and archive actions, plus the pure
   order-planning helpers the drag-and-drop controller uses.
-- `src/dsh-version.ts` — pure semver comparison and the startup gate decision.
-- `src/extension.ts` — webview shell, message relay, file/diff providers and the command surface.
+- `src/extension.ts` — webview shell, message relay, file/diff providers, the command surface and the
+  single connection-maintenance ladder.
 
 ### Runtime lifetime
 
@@ -169,19 +179,27 @@ See [runtime lifecycle](docs/runtime-lifecycle.md) for shutdown guarantees, plat
 
 ## Troubleshooting
 
-If startup fails, the Agent view shows a short, selectable diagnosis with **Copy full error**, **Open log**
-and **Retry** buttons. The **DSH Sidebar** output channel carries the complete runtime output, including the
-version-gate verdict.
+If startup fails, the Agent view shows a short, selectable diagnosis. It has no buttons: the extension
+retries the start automatically, and the **DSH Sidebar** output channel carries the complete runtime
+output, including the CLI's own failure message.
 
-- **"is older than the minimum supported dsh"** — run the upgrade command printed in the message
-  (`npm install -g @deepseek-ai/dsh`), then reload the window.
+- **The startup page names a CLI failure** — the extension launches the configured command directly, so a
+  CLI that cannot serve `dsh web` reports its own message. Use `dsh.embed.command` / `dsh.embed.args` for a
+  custom launcher, or upgrade `dsh` with `npm install -g @deepseek-ai/dsh`.
 - **"failed to start dsh"** — `dsh` is not on the extension host's `PATH`. Use `dsh.embed.command` for an
   explicit path, or install it globally on the machine that hosts the folder.
-- **History stays at “Loading history…” after reconnect** — the connection banner distinguishes remote extension communication, port forwarding and DSH data readiness. It offers **Reconnect** and **Reload page** after bounded automatic recovery. History taking more than 15 seconds displays a timeout; it does not kill the agent. Check history before resending an unconfirmed message.
+- **History stays at “Loading history…” after a connection drop** — the Agent view banner renders the
+  Extension Host's status (reconnecting, rebuilding the page, starting the runtime, waiting for the remote
+  connection) while the connection ladder repairs the page automatically; the banner has no buttons. Run
+  **DSH Sidebar: Recover Connection** to rebuild the page immediately. Repairs never resend a message, and a
+  running agent is restarted only after several rebuilds fail to connect, so check history before resending
+  an unconfirmed submission.
 - **Diagnostics** — each window writes a JSONL trace to `~/.dsh/vscode-embed/telemetry.jsonl` and publishes
   `current.json` next to it (the most recently activated window); trace rows include Host PID, workspace and runtime identity, while page events carry their page identity. The port in that file answers `/status`, `/logs`, `/ping` and `/restart` on loopback.
 
-The `/status` response also includes the latest page connection and history state. Periodic heartbeats stay in memory; only status changes enter the trace. See [page recovery](docs/runtime-lifecycle.md#page-connection-recovery) for timings and verification.
+The `/status` response also includes the latest shell heartbeat and the most recent traced event. Periodic
+heartbeats stay in memory; only status changes enter the trace. See
+[page recovery](docs/runtime-lifecycle.md#page-connection-recovery) for timings and verification.
 
 ## Privacy
 

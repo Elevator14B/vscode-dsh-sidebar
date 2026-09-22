@@ -40,12 +40,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # Keep this version in step with TESTED_DSH_VERSION in src/dsh-version.ts.
+      # Keep this in step with the CLI version the README documents as tested.
       - name: Install the DeepSeek Harness CLI
         run: npm install -g @deepseek-ai/dsh@0.1.5-rc.2
       - run: npm run smoke
-      - run: npx playwright install --with-deps chromium
-      - run: npm run smoke:recovery
 
   contract-latest:
     name: contract smoke against dsh latest (informational)

@@ -38,5 +38,5 @@ real `dsh`. `release.yml` repeats those checks on a tag and attaches the VSIX to
 1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
 2. Commit, then `git tag v<version> && git push origin v<version>`.
 3. The `release` workflow typechecks, tests, packages the VSIX and attaches it to the GitHub release.
-4. Update the compatibility table in `README.md` if the tested `dsh` version moved (and keep
-   `TESTED_DSH_VERSION` in `src/dsh-version.ts` in step with the CI contract job).
+4. Update the compatibility table in `README.md` if the tested `dsh` version moved (and keep the
+   CLI version installed by the CI contract job in step with it).

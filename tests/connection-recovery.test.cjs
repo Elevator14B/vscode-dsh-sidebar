@@ -5,6 +5,7 @@ const vm = require('node:vm')
 const { readFileSync } = require('node:fs')
 const path = require('node:path')
 
+/** Deterministic clock: these modules own no wall-clock dependency of their own. */
 function clock() {
   let now = 100000, id = 0
   const timers = new Map()
@@ -16,7 +17,7 @@ function clock() {
     async advance(ms) {
       const end = now + ms
       for (;;) {
-        const next = [...timers].filter(([, t]) => t.at <= end).sort((a,b) => a[1].at - b[1].at)[0]
+        const next = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
         if (!next) break
         const [key, t] = next; now = t.at
         if (t.repeat) t.at += t.repeat; else timers.delete(key)
@@ -29,159 +30,85 @@ function clock() {
     size: () => timers.size,
   }
 }
+
 function store(value) {
   const listeners = new Set()
   return { getSnapshot: () => value, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) },
     set(next) { value = next; for (const fn of [...listeners]) fn() }, size: () => listeners.size }
 }
-function recovery(t, status = 'connected') {
-  const time = clock(), messages = [], requests = [], reconnects = []
-  const state = store(status), a = store({ openState: 'open' }), b = store({ openState: 'open' })
-  const list = store({ current: 'a' })
-  const network = { proxy: true, backend: true, identity: 'runtime-a' }
-  const sandbox = { ...time, AbortController, URL, location: { origin: 'http://localhost:1234' },
-    fetch: async (url, options) => {
-      requests.push(url)
-      if (!network.proxy) throw new Error('forwarding down')
-      if (url.includes('health')) return { ok: true, json: async () => ({ protocol: 'dsh-sidebar-health-v1', runtimeId: network.identity }) }
-      if (!network.backend) throw new Error('backend down')
-      assert.equal(JSON.parse(options.body).method, 'session/list', 'only a read-only RPC is allowed')
-      return { ok: true, json: async () => ({ result: { ok: true } }) }
-    },
-  }
+
+/** The injected page module: it reports state and reconnects only when asked. */
+function page(t, status = 'connected') {
+  const time = clock(), messages = [], reconnects = []
+  const state = store(status)
+  const sandbox = { ...time, URL }
   vm.createContext(sandbox)
   vm.runInContext(readFileSync(path.join(__dirname, '../src/connection-recovery.js'), 'utf8'), sandbox)
-  const owner = sandbox.__DSH_INSTALL_RECOVERY__({ connection: { state, reconnect() { reconnects.push(time.Date.now()) } },
-    sessions: { list, binding(id) { return { session: id === 'a' ? a : b } } } }, m => messages.push(m), { runtimeId: 'runtime-a' })
+  const owner = sandbox.__DSH_INSTALL_RECOVERY__({ connection: { state, reconnect() { reconnects.push(time.Date.now()) } } },
+    message => messages.push(message), {})
   t.after(() => owner.dispose())
-  return { time, state, a, b, list, network, messages, reconnects, requests, owner,
+  return { time, state, messages, reconnects, owner,
     latest: () => messages.filter(m => m.type === 'connection-status').at(-1) }
 }
 
-test('healthy idle pages do not restart connections or poll session lists', async t => {
-  const f = recovery(t)
+test('the page reports DSH state and reconnects only when the host asks', async t => {
+  const f = page(t)
+  assert.equal(f.latest().connection, 'connected')
+  assert.equal(f.owner.connected(), true)
   await f.time.advance(60000)
-  assert.equal(f.reconnects.length, 0)
-  assert.ok(f.requests.every(url => url.includes('health')))
-  assert.equal(f.latest().history, 'open')
+  assert.equal(f.reconnects.length, 0, 'the page owns no retry ladder')
+  assert.equal(f.messages.length, 1, 'an unchanged state is not republished')
+  f.state.set('connecting')
+  assert.equal(f.latest().connection, 'connecting')
+  assert.equal(f.owner.connected(), false)
+  f.owner.handle({ type: 'reconnect-page' })
+  assert.equal(f.reconnects.length, 1)
   f.owner.dispose()
-  assert.equal(f.time.size(), 0)
-  assert.equal(f.state.size() + f.list.size() + f.a.size(), 0)
+  assert.equal(f.time.size(), 0, 'no timer survives disposal')
+  assert.equal(f.state.size(), 0, 'no subscription survives disposal')
 })
 
-test('history stalled on a nominally connected transport triggers bounded recovery, then records completion', async t => {
-  const f = recovery(t)
-  f.a.set({ openState: 'loading' })
-  await f.time.advance(16000)
-  assert.equal(f.latest().stalled, true)
-  await f.time.advance(18000)
-  assert.equal(f.reconnects.length, 1)
-  const request = f.messages.find(m => m.type === 'repair-forwarding')
-  assert.ok(request)
-  f.owner.handle({ type: 'forwarding-result', requestId: request.requestId, url: 'http://localhost:1234/' })
-  assert.equal(f.reconnects.length, 2)
-  await f.time.advance(60000)
-  assert.equal(f.reconnects.length, 2, 'no infinite automatic reconnect loop')
-  assert.equal(f.latest().exhausted, true)
-  f.a.set({ openState: 'open' })
-  await f.time.advance(3000)
-  assert.equal(f.latest().stalled, false)
-  assert.equal(f.latest().attempts, 0)
-  const completed = f.messages.filter(m => m.type === 'history-state').at(-1)
-  assert.equal(completed.history, 'open')
-  assert.ok(completed.elapsedMs >= 94000)
-})
-
-test('switching sessions detaches old history observations', async t => {
-  const f = recovery(t)
-  f.a.set({ openState: 'loading' })
-  await f.time.advance(12000)
-  f.list.set({ current: 'b' })
-  f.a.set({ openState: 'error' })
-  await f.time.advance(12000)
-  assert.equal(f.latest().sessionId, 'b')
-  assert.equal(f.latest().history, 'open')
-  assert.equal(f.reconnects.length, 0)
-  assert.equal(f.a.size(), 0)
-})
-
-test('a stale forward to a different backend fails the proxy identity check', async t => {
-  const f = recovery(t)
-  f.network.identity = 'different-runtime'
-  await f.time.advance(16000)
-  assert.equal(f.latest().proxy, 'unavailable')
-  f.network.identity = 'runtime-a'
-  await f.time.advance(16000)
-  assert.equal(f.latest().proxy, 'ready')
-})
-
-test('forwarding repair never silently navigates a page to a new origin', async t => {
-  const f = recovery(t, 'disconnected')
-  await f.time.advance(19000)
-  const request = f.messages.find(m => m.type === 'repair-forwarding')
-  assert.ok(request)
-  f.owner.handle({ type: 'forwarding-result', requestId: request.requestId, url: 'http://localhost:5678/' })
-  assert.equal(f.latest().reloadRequired, true)
-  assert.equal(f.reconnects.length, 1)
-})
-
+/** The injected shell: liveness reporting, relay and status rendering only. */
 function shell() {
   const time = clock(), sent = [], relayed = [], listeners = {}
-  const node = () => ({ hidden: false, textContent: '', disabled: false, addEventListener(type, fn) { this[type] = fn } })
-  const frame = { ...node(), src: 'http://localhost:1234/', contentWindow: { postMessage(m) { relayed.push(m) } } }
-  const nodes = { frame, 'connection-status': node(), 'connection-label': node(), 'connection-retry': node(), 'connection-reload': node() }
+  const node = () => ({ hidden: false, textContent: '' })
+  const frameListeners = {}
+  const frame = { src: 'http://localhost:1234/', addEventListener(type, fn) { frameListeners[type] = fn },
+    contentWindow: { postMessage(m) { relayed.push(m) } } }
+  const nodes = { frame, 'connection-status': node(), 'connection-label': node() }
   const sandbox = { ...time, URL, __DSH_SHELL_CONFIG__: { pageId: 'page-a', locale: 'zh-cn' },
     acquireVsCodeApi: () => ({ postMessage(m) { sent.push(m) } }), document: { getElementById: id => nodes[id] },
     window: { addEventListener(type, fn) { listeners[type] = fn } },
   }
+  sandbox.addEventListener = (type, fn) => { listeners[type] = fn }
   vm.createContext(sandbox)
   vm.runInContext(readFileSync(path.join(__dirname, '../src/recovery-shell.js'), 'utf8'), sandbox)
   const host = m => listeners.message({ source: {}, data: { __dshHost: true, ...m } })
   const bridge = m => listeners.message({ source: frame.contentWindow, data: { source: 'dsh-vscode-bridge', ...m } })
-  return { time, sent, relayed, nodes, host, bridge,
-    pong: () => host({ type: 'host-pong', pageId: 'page-a', sentAt: time.Date.now() }) }
+  return { time, sent, relayed, nodes, host, bridge, label: () => nodes['connection-label'].textContent }
 }
 
-test('a delayed EH pong cannot declare recovery; a fresh pong requests forwarding repair', async () => {
+test('the shell renders the host status and relays both directions', () => {
   const f = shell()
-  await f.time.advance(12000)
-  assert.match(f.nodes['connection-label'].textContent, /远端扩展/)
-  assert.equal(f.nodes['connection-reload'].disabled, true)
-  f.host({ type: 'host-pong', sentAt: 100000 })
-  assert.equal(f.nodes['connection-reload'].disabled, true)
-  f.pong()
-  assert.equal(f.nodes['connection-reload'].disabled, false)
-  assert.ok(f.sent.some(m => m.type === 'repair-forwarding'))
-  assert.ok(f.relayed.some(m => m.type === 'reconnect-page'))
-})
-
-test('buffered session clicks coalesce and old page responses are ignored', async () => {
-  const f = shell()
-  for (const sessionId of ['a', 'b', 'c']) f.host({ type: 'open-session', sessionId })
-  f.host({ type: 'forwarding-result', pageId: 'old-page', url: 'http://localhost:9999/' })
-  await f.time.advance(100)
-  assert.deepEqual(f.relayed.map(m => m.sessionId), ['c'])
+  f.host({ type: 'status', status: 'offline' })
+  assert.equal(f.nodes['connection-status'].hidden, false)
+  assert.match(f.label(), /远端连接/)
+  f.host({ type: 'status', status: 'rebuilding' })
+  assert.match(f.label(), /正在重建/)
+  f.host({ type: 'status' })
   assert.equal(f.nodes['connection-status'].hidden, true)
+  f.bridge({ type: 'connection-status', connection: 'connected' })
+  assert.equal(f.sent.filter(m => m.type === 'connection-status').at(-1).pageId, 'page-a')
+  f.host({ type: 'configure', theme: 'dark' })
+  assert.equal(f.relayed.at(-1).type, 'configure')
+  f.host({ pageId: 'old-page', type: 'status', status: 'rebuilding' })
+  assert.equal(f.nodes['connection-status'].hidden, true, 'another page cannot drive this shell')
 })
 
-test('history timeout is visible despite a healthy EH and bridge, with page-only recovery actions', () => {
+test('the shell proves client liveness on every tick', async () => {
   const f = shell()
-  f.pong()
-  f.bridge({ type: 'bridge-loaded' })
-  f.bridge({ type: 'connection-status', connection: 'connected', proxy: 'ready', backend: 'ready', history: 'loading', stalled: true })
-  assert.match(f.nodes['connection-label'].textContent, /历史加载超时/)
-  f.nodes['connection-retry'].click()
-  f.nodes['connection-reload'].click()
-  assert.ok(f.sent.some(m => m.type === 'reload-page'))
-  assert.ok(f.relayed.some(m => m.type === 'reconnect-page'))
-  assert.ok(!f.sent.some(m => /restart|prompt/.test(m.type)))
-})
-
-
-test('changed forwarding remains visible when the old page keeps sending healthy heartbeats', () => {
-  const f = shell()
-  f.bridge({ type: 'bridge-loaded' })
-  f.host({ type: 'forwarding-result', pageId: 'page-a', url: 'http://localhost:5678/' })
-  f.bridge({ type: 'connection-status', connection: 'connected', proxy: 'ready', backend: 'ready', history: 'open' })
-  assert.match(f.nodes['connection-label'].textContent, /端口转发地址已变化/)
+  assert.equal(f.sent.filter(m => m.type === 'shell-ready').length, 1)
+  await f.time.advance(9000)
+  assert.equal(f.sent.filter(m => m.type === 'shell-alive').length, 3)
+  assert.equal(f.sent.filter(m => m.type === 'host-ping').length, 0, 'the host no longer needs a round trip')
 })

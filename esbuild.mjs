@@ -2,6 +2,10 @@ import { build, context } from 'esbuild'
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 mkdirSync('dist', { recursive: true })
+// connection-recovery.js is prepended to bridge.js in one classic script, so it
+// must stay a complete statement list that ENDS WITH A SEMICOLON: without one,
+// bridge.js's trailing IIFE is parsed as a call of this module's last value (the
+// bug is a page that dies at load, not a build error).
 writeFileSync('dist/bridge.js', readFileSync('src/connection-recovery.js', 'utf8') + '\n' + readFileSync('src/bridge.js', 'utf8'))
 copyFileSync('src/recovery-shell.js', 'dist/recovery-shell.js')
 

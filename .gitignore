@@ -35,7 +35,6 @@ Thumbs.db
 # Test and coverage artifacts
 coverage/
 .vscode-test/
-playwright-report/
 
 # Local dumps
 /tmp-*

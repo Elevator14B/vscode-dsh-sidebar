@@ -19,7 +19,6 @@ export type GuardianEvent =
   | { readonly type: 'process-started'; readonly pid: number }
   | { readonly type: 'process-reaped'; readonly pid: number }
   | { readonly type: 'log'; readonly text: string }
-  | { readonly type: 'version'; readonly message: string; readonly version?: string; readonly ok: boolean }
   | { readonly type: 'url'; readonly url: string; readonly pid: number }
   | { readonly type: 'failure'; readonly message: string }
   | { readonly type: 'stopped' }

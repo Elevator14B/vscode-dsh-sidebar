@@ -149,6 +149,24 @@ export class DshRuntime implements vscode.Disposable {
     return starting
   }
 
+  /**
+   * Rebuild the browser-facing proxy on a fresh loopback authority.
+   *
+   * VS Code caches one client-side forward per remote authority. When the SSH
+   * transport drops, that forward can stay dead while `asExternalUri` keeps
+   * returning the same local URL, so the page can never load again. A port VS
+   * Code has never resolved is the one repair its cache cannot answer.
+   * @returns the new proxy origin, or undefined when no backend is ready.
+   */
+  async rotateOrigin(): Promise<string | undefined> {
+    const generation = this.current
+    if (generation?.proxy === undefined || generation.url === undefined) return undefined
+    const port = await generation.proxy.relisten()
+    generation.url = generation.proxy.origin
+    this.telemetry('runtime.proxy-rotated', { proxyPort: port, hostPid: process.pid })
+    return generation.url
+  }
+
   /** Concurrent restart requests produce one replacement backend. */
   restart(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('DSH runtime is disposed'))
@@ -272,10 +290,6 @@ export class DshRuntime implements vscode.Disposable {
           case 'process-started': processes.set(event.pid, new ProcessTree(event.pid)); break
           case 'process-reaped': processes.delete(event.pid); break
           case 'log': this.output.append(event.text); break
-          case 'version':
-            this.output.appendLine(`[runtime] ${event.message}`)
-            this.telemetry('runtime.version', { version: event.version ?? null, ok: event.ok })
-            break
           case 'url':
             this.telemetry('runtime.spawned', { hostPid: process.pid, guardianPid: guardian.pid, backendPid: event.pid })
             finish(undefined, event.url)

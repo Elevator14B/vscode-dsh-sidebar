@@ -45,3 +45,17 @@ test('closing the proxy terminates both sides of a live WebSocket and pending HT
   assert.equal(connections.size, 0, 'upstream sockets must be closed as well')
   await assert.rejects(proxy.listen(0), /closing/)
 })
+
+test('relisten binds a fresh port and drops the previous listener', { timeout: 5000 }, async t => {
+  const backend = createServer((_req, res) => { res.end('ok') })
+  backend.listen(0, '127.0.0.1')
+  await once(backend, 'listening')
+  const proxy = new mod.exports.DshBridgeProxy(`http://127.0.0.1:${backend.address().port}`, '', { cwd: '/fixture', canonicalCwd: '/fixture', title: 'test', theme: 'light', locale: 'en' })
+  t.after(async () => { await proxy.close(); await new Promise(resolve => { backend.close(resolve) }) })
+  const first = await proxy.listen(0)
+  const second = await proxy.relisten()
+  assert.notEqual(second, first, 'a rebuilt page needs an authority the client has never resolved')
+  assert.equal(await fetch(`http://127.0.0.1:${second}/`).then(response => response.text()), 'ok')
+  await assert.rejects(fetch(`http://127.0.0.1:${first}/`))
+})
+
