@@ -3,6 +3,41 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## Unreleased
+
+This work is committed separately from the released `0.4.0`; no version number or tag is assigned yet.
+
+### Changed
+
+- DSH now belongs to a per-workspace keeper instead of an Extension Host. The keeper is one detached process
+  per canonical workspace with no IPC channel to any window; several Remote-SSH connections or windows of
+  the same folder attach to the same backend through it. `src/runtime-guardian.ts` and
+  `src/runtime-ownership.ts` are removed and replaced by `src/runtime-keeper.ts`, `src/runtime-client.ts`
+  and `src/runtime-workspace.ts`.
+- Disposing a runtime only detaches: the window closes its proxy and its control socket, and every other
+  window of that folder keeps using the same backend. The keeper reference-counts attached Hosts and reaps
+  the CLI only after the last client detached and the idle grace expired (`IDLE_GRACE_MS`, 120 seconds).
+- `restart()` replaces the shared backend through the keeper, so it interrupts running tasks in every window
+  of that folder rather than only the window that asked. `rotateOrigin()` still rotates the window's
+  browser-facing proxy and leaves the backend untouched.
+- The browser-session cookie is minted and held by the keeper and shared by every attached Host; a window
+  receives it over the loopback control socket after presenting the token from the `0600` share record, and
+  its proxy injects it upstream. The browser still never receives it.
+
+### Added
+
+- `src/runtime-workspace.ts` publishes one owner-only share record per workspace
+  (`~/.dsh/vscode-embed/workspaces/<key>.json`) and takes a bootstrap lock, so concurrent windows of one
+  folder fork exactly one keeper.
+- A replacement keeper reads its dead predecessor's record before overwriting it and reaps the orphaned
+  backend only when the recorded PID still has the recorded kernel start time.
+- A dead keeper is detected by the control socket closing; readiness drops, and the next attach forks a
+  replacement. Different workspaces keep separate keys, control ports, keepers and backends.
+- `npm run smoke` now checks eight contracts: keeper launch, the cookie-authenticated proxy page,
+  `session/list`, `workspace/insertSessionBefore`, `workspace/archiveSession`, a second window attaching to
+  the same backend port, one window detaching while the other keeps working, and the last detach letting the
+  keeper reap the backend.
+
 ## 0.4.0
 
 ### Changed

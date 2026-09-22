@@ -12,11 +12,14 @@ yourself.
 - Environment: VS Code 1.96+, DSH `0.1.5-rc.1` or newer (tested with `0.1.5-rc.2`), Node.js 22+ on the
   host's `PATH`. Those CLI versions are documentation, not a gate: the extension launches the configured
   command directly and reports what it does.
+- Runtime: one detached workspace keeper per folder owns the `dsh` backend on the machine that hosts the
+  folder. Every window or Remote-SSH connection to that folder attaches to the same backend.
 
 The extension starts a DSH web runtime (`dsh web`) with the first VS Code workspace folder as its working
 directory, proxies the authenticated page into a sidebar webview, and bridges the two sides: the page's own
 sidebar is replaced by the VS Code folder, and file/diff navigation, reference chips, the sessions tree and
-the theme all live in VS Code natively.
+the theme all live in VS Code natively. The runtime belongs to the folder, not to the window: a detached
+workspace keeper owns it, and every window or Remote-SSH connection to that folder attaches to the same one.
 
 ## Features
 
@@ -46,7 +49,9 @@ the theme all live in VS Code natively.
 - **Theme follows VS Code.** Light/dark follows `workbench.colorScheme`, live, without touching the shared
   DSH settings document.
 - **Local-only runtime.** Each window gets its own loopback proxy; the browser-session auth cookie is minted
-  and held in the extension host and never reaches the client browser.
+  and held by the workspace keeper and handed to a window only over the keeper's loopback control socket,
+  after the window presents the token from the owner-only (`0600`) share record. The proxy injects it
+  upstream, so the cookie never reaches the client browser.
 
 ## Requirements
 
@@ -59,9 +64,9 @@ the theme all live in VS Code natively.
   npm install -g @deepseek-ai/dsh
   ```
 
-The extension launches the configured command directly — there is no pre-flight version check. A CLI that
-cannot serve `dsh web` fails with its own message on the Agent view's startup page and in the
-**DSH Sidebar** output channel. See [Compatibility](#compatibility).
+The extension's workspace keeper launches the configured command directly — there is no pre-flight version
+check. A CLI that cannot serve `dsh web` fails with its own message on the Agent view's startup page and in
+the **DSH Sidebar** output channel. See [Compatibility](#compatibility).
 
 ## Install
 
@@ -135,14 +140,16 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 
 ## Architecture
 
-- `src/runtime.ts` — owns one cancellable backend generation and window proxy, exchanges the one-time
-  launch token for the browser-session cookie inside the Extension Host, and rebinds the proxy to a fresh
-  loopback authority on demand (`rotateOrigin`).
-- `src/runtime-guardian.ts` — launches and supervises the configured command in a separate process, with
-  no `dsh --version` probe, watches the owning Host's IPC connection, and reaps DSH when that Host exits,
-  including abrupt termination.
-- `src/runtime-ownership.ts` / `src/process-tree.ts` — reserve the workspace until cleanup completes and
-  terminate private process groups plus observed Linux descendants.
+- `src/runtime.ts` — attaches this window to its workspace keeper, publishes the window's own loopback
+  bridge proxy, detaches on stop or dispose, and rebinds the proxy to a fresh loopback authority on demand
+  (`rotateOrigin`). `restart()` asks the keeper to replace the shared backend.
+- `src/runtime-keeper.ts` — the detached per-workspace owner of one DSH backend: it launches the configured
+  command, exchanges the one-time launch token for the browser-session cookie, counts attached Hosts, and
+  reaps the CLI only after the last one detached and the idle grace expired.
+- `src/runtime-client.ts` — the Extension Host side of the control protocol: attaches to the keeper named by
+  the share record, or forks exactly one keeper under a bootstrap lock when that record is missing or stale.
+- `src/runtime-workspace.ts` / `src/process-tree.ts` — workspace key, candidate control ports, the `0600`
+  share record and bootstrap lock; private process groups plus observed Linux descendants for cleanup.
 - `src/proxy.ts` — loopback reverse proxy (HTTP + WebSocket) that injects the auth cookie, rewrites the
   boot theme to the VS Code theme, serves the injected bridge script, and binds a fresh port when the page
   must be rebuilt (`relisten`).
@@ -162,18 +169,22 @@ changes it, `npm run smoke` and the CI contract job are what catch it first.
 
 ### Runtime lifetime
 
-SSH disconnection keeps DSH running while its **Extension Host** survives. Reconnecting to that Host reuses
-the backend. Replacing or exiting the Host stops its DSH; a new Host starts a new backend and can resume
-persisted conversations, but does not inherit in-flight execution. The longer-lived VS Code Server is
-not the owner. Hiding the sidebar has no effect on the backend.
+The runtime belongs to a canonical workspace folder, not to a window or an Extension Host. The first window
+or Remote-SSH connection of a folder starts a detached **workspace keeper**; every later window of the same
+folder attaches to that keeper and reuses its one backend. Closing a window, losing the SSH transport or
+replacing the Extension Host therefore does not stop the backend or a running agent — the keeper is
+independent of all of them. Only after the last attached window has detached does the keeper wait out its
+idle grace (two minutes) and then stop the CLI. Hiding the sidebar has no effect on the backend.
 
-Only one Sidebar runtime per OS user may own a canonical workspace in the same network namespace at a time.
-A replacement waits for old-process cleanup; another live window on that workspace receives an ownership
-error instead of starting a competing writer. Use the owning window, or close it before retrying.
+Windows of different folders get separate keepers, control ports and backends. Two live windows on one folder
+are no longer a conflict: they share the backend, and a restart replaces that shared backend, interrupting
+tasks in every window of the folder.
 
-On first upgrade from 0.3.12, finish or cancel work and stop the old runtime before reloading. Existing
-unguarded processes cannot be adopted automatically. An occupied backend port is reported instead of
-silently choosing a random port. Do not remove `session.lock` files to resolve ownership.
+A keeper that is killed is replaced by the next window that attaches, and the replacement reaps the backend
+its predecessor orphaned. Runtimes from 0.3.12–0.4.0 have no keeper and cannot be adopted: finish or cancel
+their work and stop the old runtime before reloading. An occupied backend port is still a CLI failure
+reported through the keeper, not permission to pick another port. Do not remove session lock files; DSH's
+own session flock remains the final cross-process writer exclusion.
 
 See [runtime lifecycle](docs/runtime-lifecycle.md) for shutdown guarantees, platform limits and tests.
 
@@ -192,8 +203,9 @@ output, including the CLI's own failure message.
   Extension Host's status (reconnecting, rebuilding the page, starting the runtime, waiting for the remote
   connection) while the connection ladder repairs the page automatically; the banner has no buttons. Run
   **DSH Sidebar: Recover Connection** to rebuild the page immediately. Repairs never resend a message, and a
-  running agent is restarted only after several rebuilds fail to connect, so check history before resending
-  an unconfirmed submission.
+  running agent is restarted only after several rebuilds fail to connect; that restart replaces the shared
+  backend, so it interrupts tasks in every window of the folder. Check history before resending an
+  unconfirmed submission.
 - **Diagnostics** — each window writes a JSONL trace to `~/.dsh/vscode-embed/telemetry.jsonl` and publishes
   `current.json` next to it (the most recently activated window); trace rows include Host PID, workspace and runtime identity, while page events carry their page identity. The port in that file answers `/status`, `/logs`, `/ping` and `/restart` on loopback.
 
@@ -205,9 +217,13 @@ heartbeats stay in memory; only status changes enter the trace. See
 
 The extension uploads nothing. It writes its own JSONL trace under `~/.dsh/vscode-embed/`, binds its proxy
 and its diagnostic server to `127.0.0.1` only, and never sends a request of its own to any other host: the
-only network peer it talks to is the DSH process it started. Following a link in the conversation opens
-VS Code's Simple Browser, which then loads that URL the way any browser would. The only external processes
-it runs are the `dsh` CLI you installed and `git`, the latter to read a file's HEAD content when the
+only network peers it talks to are the DSH process it started and its own workspace keeper on loopback. The
+keeper writes the owner-only (`0600`) share record under `~/.dsh/vscode-embed/workspaces/`; the
+browser-session cookie lives in the keeper, is handed to an attached window only over that loopback control
+socket after the window presents the record's token, and is injected upstream by the window proxy, so the
+browser never receives it. Following a link in the conversation opens VS Code's Simple Browser, which then
+loads that URL the way any browser would. Besides its own keeper process, the only external processes it
+runs are the `dsh` CLI you installed and `git`, the latter to read a file's HEAD content when the
 conversation asks for a diff against HEAD.
 
 ## License

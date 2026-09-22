@@ -28,6 +28,20 @@ function send(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * Start time of one live process, the identity that survives PID reuse.
+ * @param pid - process to probe.
+ * @returns the kernel start ticks, or undefined when the process is gone.
+ */
+export function processStart(pid: number): string | undefined {
+  try {
+    const text = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    return text.slice(text.lastIndexOf(')') + 2).split(' ')[19]
+  } catch (_error) {
+    return undefined
+  }
+}
+
 /** Tracks identity as well as PID so an observed exited descendant is never killed after PID reuse. */
 export class ProcessTree {
   private readonly known = new Map<number, string>()

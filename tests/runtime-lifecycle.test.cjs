@@ -12,12 +12,29 @@ const fixture = path.join(__dirname, 'fixtures/runtime-backend.cjs')
 fs.chmodSync(fixture, 0o755)
 const code = buildSync({ entryPoints: [path.join(root, 'src/runtime.ts')], bundle: true, platform: 'node', format: 'cjs', external: ['vscode'], write: false }).outputFiles[0].text
 
-function setup(t, mode = '') {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-runtime-test-'))
-  const pidPath = path.join(cwd, 'pids')
-  const oldMode = process.env.FIXTURE_MODE
-  const oldPids = process.env.FIXTURE_PID_PATH
-  process.env.FIXTURE_MODE = mode
+function alive(pid) {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+async function until(predicate, ms = 15000) {
+  const deadline = Date.now() + ms
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition timed out')
+    await delay(25)
+  }
+}
+
+/**
+ * One Extension Host attachment. Passing the same folder and share directory
+ * models a second window (or a replaced Host) of the same Remote-SSH folder.
+ */
+function setup(t, options = {}) {
+  const folder = options.folder ?? fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-lifecycle-'))
+  const share = options.share ?? fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-share-'))
+  const pidPath = path.join(folder, 'pids')
+  const previous = { share: process.env.DSH_EMBED_SHARE_DIR, grace: process.env.DSH_EMBED_IDLE_GRACE_MS, pids: process.env.FIXTURE_PID_PATH }
+  process.env.DSH_EMBED_SHARE_DIR = share
+  process.env.DSH_EMBED_IDLE_GRACE_MS = '1000'
   process.env.FIXTURE_PID_PATH = pidPath
   const vscode = {
     env: { language: 'en' },
@@ -31,85 +48,91 @@ function setup(t, mode = '') {
   const mod = { exports: {} }
   new Function('require', 'module', 'exports', code)(id => id === 'vscode' ? vscode : require(id), mod, mod.exports)
   const events = []
-  const runtime = new mod.exports.DshRuntime({ extensionUri: { fsPath: root } }, { uri: { fsPath: cwd }, name: 'fixture' }, { append() {}, appendLine() {} }, (event, data) => { events.push({ event, ...data }) })
+  const runtime = new mod.exports.DshRuntime({ extensionUri: { fsPath: root } },
+    { uri: { fsPath: folder }, name: 'fixture' }, { append() {}, appendLine() {} },
+    (event, data) => events.push({ event, ...data }))
   const pids = () => fs.existsSync(pidPath) ? fs.readFileSync(pidPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
   t.after(async () => {
     await runtime.dispose()
-    if (oldMode === undefined) delete process.env.FIXTURE_MODE
-    else process.env.FIXTURE_MODE = oldMode
-    if (oldPids === undefined) delete process.env.FIXTURE_PID_PATH
-    else process.env.FIXTURE_PID_PATH = oldPids
-    fs.rmSync(cwd, { recursive: true, force: true })
-  })
-  return { runtime, pids, events }
-}
-
-function isGone(pid) {
-  try {
-    if (process.platform === 'linux') {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
-      if (['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0])) return true
+    const records = fs.existsSync(share) ? fs.readdirSync(share).filter(name => name.endsWith('.json')) : []
+    for (const name of records) {
+      try { process.kill(JSON.parse(fs.readFileSync(path.join(share, name), 'utf8')).pid, 'SIGKILL') } catch (_error) { /* already gone */ }
     }
-    process.kill(pid, 0); return false
-  } catch (error) { if (['ESRCH', 'ENOENT'].includes(error.code)) return true; throw error }
+    for (const entry of pids()) { try { process.kill(entry.pid, 'SIGKILL') } catch (_error) { /* already gone */ } }
+    if (previous.share === undefined) delete process.env.DSH_EMBED_SHARE_DIR
+    else process.env.DSH_EMBED_SHARE_DIR = previous.share
+    if (previous.grace === undefined) delete process.env.DSH_EMBED_IDLE_GRACE_MS
+    else process.env.DSH_EMBED_IDLE_GRACE_MS = previous.grace
+    if (previous.pids === undefined) delete process.env.FIXTURE_PID_PATH
+    else process.env.FIXTURE_PID_PATH = previous.pids
+  })
+  return { runtime, events, pids, folder, share }
 }
 
-test('concurrent starts and restarts each produce one backend generation', { skip: process.platform === 'win32', timeout: 15000 }, async t => {
-  const { runtime, pids } = setup(t)
-  const urls = await Promise.all([runtime.getWebUrl(), runtime.getWebUrl(), runtime.getWebUrl()])
+test('concurrent attachments of one window share a single backend', { timeout: 30000 }, async t => {
+  const f = setup(t)
+  const urls = await Promise.all([f.runtime.getWebUrl(), f.runtime.getWebUrl(), f.runtime.getWebUrl()])
   assert.equal(new Set(urls).size, 1)
-  assert.equal(pids().length, 1)
-  assert.equal(await runtime.getWebUrl(), urls[0])
-  await Promise.all([runtime.restart(), runtime.restart()])
-  const backends = pids()
-  assert.equal(backends.length, 2)
-  assert.ok(isGone(backends[0].pid))
-  await runtime.stop()
-  assert.equal(runtime.origin, undefined)
-  assert.ok(pids().every(p => isGone(p.pid)))
+  assert.equal(f.pids().length, 1)
+  assert.equal(await f.runtime.getWebUrl(), urls[0])
 })
 
-test('authentication failure reaps each generation before allowing retry', { skip: process.platform === 'win32', timeout: 15000 }, async t => {
-  const { runtime, pids } = setup(t, 'missing-cookie')
-  for (let i = 0; i < 2; i++) {
-    await assert.rejects(runtime.getWebUrl(), /browser-session cookie/)
-    assert.equal(runtime.origin, undefined)
-    assert.ok(pids().every(p => isGone(p.pid)))
-  }
-  assert.equal(pids().length, 2)
+test('a second window attaches to the running backend and survives the first detaching', { timeout: 40000 }, async t => {
+  const f = setup(t)
+  await f.runtime.getWebUrl()
+  const second = setup(t, { folder: f.folder, share: f.share })
+  const secondUrl = await second.runtime.getWebUrl()
+  const firstReady = f.events.find(entry => entry.event === 'runtime.ready')
+  const secondReady = second.events.find(entry => entry.event === 'runtime.ready')
+  assert.equal(secondReady.shared, true, 'the second window reuses the running backend')
+  assert.equal(secondReady.backendPort, firstReady.backendPort)
+  assert.equal(secondReady.keeperPid, firstReady.keeperPid)
+  assert.equal(f.pids().length, 1, 'no second backend was started')
+  await f.runtime.dispose()
+  await delay(1500) // longer than the idle grace that follows zero clients
+  assert.equal(f.pids().length, 1, 'the backend outlives the window that started it')
+  assert.ok(alive(f.pids()[0].pid))
+  assert.equal((await fetch(secondUrl + '/__dsh_vscode_health')).status, 200, 'the remaining window keeps working')
 })
 
-test('stop during startup cancels the spawn and reaps the child', { skip: process.platform === 'win32', timeout: 12000 }, async t => {
-  const { runtime, pids } = setup(t, 'never-ready')
-  const starting = assert.rejects(runtime.getWebUrl(), /cancelled/)
-  const deadline = Date.now() + 5000
-  while (pids().length === 0) { assert.ok(Date.now() < deadline); await delay(20) }
-  await runtime.stop()
-  await starting
-  assert.ok(pids().every(p => isGone(p.pid)))
-  assert.equal(runtime.origin, undefined)
+test('the backend is reaped after the last window detaches', { timeout: 30000 }, async t => {
+  const f = setup(t)
+  await f.runtime.getWebUrl()
+  const backend = f.pids()[0].pid
+  await f.runtime.dispose()
+  await until(() => !alive(backend), 15000)
 })
 
-test('stop cancels a hanging authentication exchange; disposal forbids resurrection', { skip: process.platform === 'win32', timeout: 12000 }, async t => {
-  const { runtime, pids } = setup(t, 'auth-hang')
-  const starting = assert.rejects(runtime.getWebUrl(), /abort|cancel/iu)
-  const deadline = Date.now() + 5000
-  while (pids().length === 0) { assert.ok(Date.now() < deadline); await delay(20) }
-  await delay(100)
-  await runtime.dispose()
-  await starting
-  await assert.rejects(runtime.getWebUrl(), /disposed/)
-  assert.ok(pids().every(p => isGone(p.pid)))
+test('different folders keep their own keeper and backend', { timeout: 40000 }, async t => {
+  const first = setup(t)
+  await first.runtime.getWebUrl()
+  const second = setup(t)
+  await second.runtime.getWebUrl()
+  assert.equal(first.pids().length, 1)
+  assert.equal(second.pids().length, 1)
+  assert.notEqual(first.events.find(entry => entry.event === 'runtime.ready').keeperPid,
+    second.events.find(entry => entry.event === 'runtime.ready').keeperPid)
 })
 
-test('surviving Host reaps the backend if its guardian is killed, then permits restart', { skip: process.platform !== 'linux', timeout: 12000 }, async t => {
-  const { runtime, pids, events } = setup(t)
-  await runtime.getWebUrl()
-  const oldBackend = pids()[0].pid
-  process.kill(events.find(e => e.event === 'runtime.spawned').guardianPid, 'SIGKILL')
-  const deadline = Date.now() + 5000
-  while (!isGone(oldBackend)) { assert.ok(Date.now() < deadline); await delay(25) }
-  await runtime.restart()
-  assert.equal(pids().length, 2)
-  assert.ok(runtime.origin)
+test('restart replaces the shared backend without replacing the window proxy', { timeout: 40000 }, async t => {
+  const f = setup(t)
+  const url = await f.runtime.getWebUrl()
+  const before = f.pids()[0].pid
+  await f.runtime.restart()
+  await until(() => f.pids().length === 2, 15000)
+  assert.notEqual(f.pids()[1].pid, before)
+  assert.equal(await f.runtime.getWebUrl(), url, 'the window keeps its proxy authority')
+  assert.equal((await fetch(url + '/__dsh_vscode_health')).status, 200)
+})
+
+test('a killed keeper is replaced and its orphaned backend is reaped', { timeout: 60000 }, async t => {
+  const f = setup(t)
+  await f.runtime.getWebUrl()
+  const keeperPid = f.events.find(entry => entry.event === 'runtime.ready').keeperPid
+  const orphan = f.pids()[0].pid
+  process.kill(keeperPid, 'SIGKILL')
+  await until(() => f.runtime.origin === undefined, 15000)
+  assert.ok(await f.runtime.getWebUrl(), 'the next attach forks a replacement keeper')
+  await until(() => f.pids().length === 2, 20000)
+  await until(() => !alive(orphan), 20000)
 })

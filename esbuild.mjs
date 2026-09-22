@@ -11,7 +11,7 @@ copyFileSync('src/recovery-shell.js', 'dist/recovery-shell.js')
 
 /** Shared build options for the extension host bundle. */
 const options = {
-  entryPoints: ['src/extension.ts', 'src/runtime-guardian.ts'],
+  entryPoints: ['src/extension.ts', 'src/runtime-keeper.ts'],
   bundle: true,
   platform: 'node',
   format: 'cjs',
