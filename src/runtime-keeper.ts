@@ -21,7 +21,8 @@ interface Options { cwd: string; graceMs: number }
 
 function parseOptions(argv: readonly string[]): Options {
   let cwd = ''
-  const fromEnv = Number(process.env.DSH_EMBED_IDLE_GRACE_MS ?? '')
+  const configuredGrace = process.env.DSH_EMBED_IDLE_GRACE_MS
+  const fromEnv = configuredGrace === undefined || configuredGrace.trim() === '' ? NaN : Number(configuredGrace)
   let graceMs = Number.isSafeInteger(fromEnv) && fromEnv >= 0 ? fromEnv : IDLE_GRACE_MS
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--cwd' && argv[index + 1] !== undefined) cwd = argv[index + 1]!

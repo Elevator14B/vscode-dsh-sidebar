@@ -7,6 +7,12 @@ its first public release; `0.3.11` is the first version published on GitHub.
 
 This work is committed separately from the released `0.4.0`; no version number or tag is assigned yet.
 
+### Fixed
+
+- The workspace keeper now uses its 120-second idle grace when the override is unset. Previously an
+  unset value parsed as zero, so the keeper exited before the Extension Host could attach and the
+  sidebar timed out during startup.
+
 ### Changed
 
 - DSH now belongs to a per-workspace keeper instead of an Extension Host. The keeper is one detached process

@@ -46,7 +46,9 @@ function client(record) {
 
 async function startKeeper(t, { cwd, graceMs = 1500, env = {} }) {
   const share = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-share-'))
-  const keeper = spawn(process.execPath, [keeperPath, '--cwd', cwd, '--grace', String(graceMs)], {
+  const args = [keeperPath, '--cwd', cwd]
+  if (graceMs !== null) args.push('--grace', String(graceMs))
+  const keeper = spawn(process.execPath, args, {
     detached: true, stdio: ['ignore', 'ignore', 'inherit'],
     env: { ...process.env, DSH_EMBED_SHARE_DIR: share, ...env },
   })
@@ -72,6 +74,20 @@ async function startKeeper(t, { cwd, graceMs = 1500, env = {} }) {
 function alive(pid) {
   try { process.kill(pid, 0); return true } catch { return false }
 }
+
+test('an unset idle grace keeps the cold keeper alive until a Host can attach', { timeout: 15000 }, async t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-'))
+  const { record, shareDir } = await startKeeper(t, {
+    cwd, graceMs: null, env: { DSH_EMBED_IDLE_GRACE_MS: undefined },
+  })
+  await delay(250)
+  assert.ok(alive(record.pid), 'the default grace must not be parsed as zero')
+  assert.ok(fs.existsSync(path.join(shareDir, record.key + '.json')))
+  const attached = client(record)
+  t.after(() => { attached.socket.destroy() })
+  attached.request({ type: 'status' })
+  await attached.until(() => attached.events.some(event => event.type === 'state'))
+})
 
 test('two clients share one backend; only the last detach reaps it', { timeout: 60000 }, async t => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-'))
