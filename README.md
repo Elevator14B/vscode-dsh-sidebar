@@ -31,9 +31,10 @@ workspace keeper owns it, and every window or Remote-SSH connection to that fold
   sidebar's own Workspace RPCs, so order and archive state stay shared between the two surfaces.
 - **Native file and diff navigation.** `read` / `write` tool paths in the conversation open the file in
   VS Code; `edit` tool paths open a **tool-change diff** (`old_string` → `new_string`, independent of git).
-  The closing turn's produced-file chips and delivery cards open in the editor too, and the card's chevron
-  offers *Open in Editor*, *Open to the Side* and *Reveal in Explorer* — the host's desktop application is
-  never the target, which is what makes the cards usable over Remote-SSH.
+  The closing turn's produced-file chips, its file mentions in the prose (delivered files included), and
+  the delivery cards open in the editor too, and the card's chevron offers *Open in Editor*, *Open to the
+  Side* and *Reveal in Explorer* — the host's desktop application is never the target, which is what makes
+  them usable over Remote-SSH.
 - **Links open inside VS Code.** URLs in the conversation open in the built-in Simple Browser webview, with
   an OS-browser fallback.
 - **Drag-to-reference.** Drag an editor tab, an Explorer row, or a compatible native drag into the sidebar to

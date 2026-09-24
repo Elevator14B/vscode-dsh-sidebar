@@ -11,6 +11,12 @@
  * chevron live across re-renders, and hides the host-desktop rows, because in a
  * VS Code webview the editor is the only opener that exists.
  *
+ * The same delivered file is also mentioned in the closing prose, where its
+ * tile is an inline-code button instead of a card: its own handler POSTs the
+ * delivery coordinates to the Host's `/api/present.open`, so on that same
+ * desktop-less host the click would silently do nothing. The click walk opens
+ * the tooltip's path in the editor for those mentions too.
+ *
  * The `workspace-state` publish carries the archive set as well, since an
  * archived session leaves the native Sessions tree without reordering the rest.
  *
@@ -313,6 +319,23 @@ function createPage(options = {}) {
     return card
   }
 
+  /**
+   * One closing-prose mention as the app renders it: an inline-code tile whose
+   * button carries the whole path in its tooltip and only the basename as text.
+   * The optional `classes` reproduce the markdown file link, which adds the
+   * tool row's own class to the same button.
+   */
+  function addMention(title, text, classes) {
+    const code = new FakeElement('code')
+    const button = new FakeElement('button')
+    button.setAttribute('class', classes === undefined ? '_fileMention_1a2b3_9' : classes)
+    if (title !== null && title !== undefined) button.setAttribute('title', title)
+    button.textContent = text
+    code.appendChild(button)
+    chat.appendChild(code)
+    return button
+  }
+
   function dispatchTo(type, capture, event) {
     for (const entry of [...(documentListeners.get(type) ?? [])]) {
       if (entry.capture !== capture) continue
@@ -374,6 +397,7 @@ function createPage(options = {}) {
     workspacesList,
     sessionsList,
     addCard,
+    addMention,
     clickOn,
     pressEscape,
     notifyMutations,
@@ -502,6 +526,36 @@ test('the third choice reveals the file in the explorer', () => {
   page.openCardMenu()
   page.menu().children[2].dispatch('click')
   assert.deepEqual(page.posted, [{ source: 'dsh-vscode-bridge', type: 'reveal-file', path: CARD_PATH }])
+})
+
+test('a closing-prose mention of a delivered file opens its tooltip path in the editor', () => {
+  reset()
+  // The app's own handler would POST /api/present.open; a headless serving host
+  // answers 409, so this click has to end in the editor here instead.
+  const mention = page.addMention(CARD_PATH, CARD_RELATIVE)
+  const event = page.clickOn(mention)
+  assert.deepEqual(page.posted, [{ source: 'dsh-vscode-bridge', type: 'open-file', path: CARD_PATH }])
+  assert.equal(event.defaultPrevented, true, 'the app must not also fire its native-open POST')
+  assert.equal(event.propagationStopped, true)
+  assert.deepEqual(appClicks, [], 'the mention click never reaches the app root')
+})
+
+test('a markdown file link opens its tooltip path, not its visible label', () => {
+  reset()
+  // Newer DSH renders a local-destination link with the mention class pair and
+  // the full path in the tooltip; the visible text may be an arbitrary label.
+  const link = page.addMention(CARD_PATH, 'the report', '_fileMention_1a2b3_9 _fileLink_1a2b3_11')
+  page.clickOn(link)
+  assert.deepEqual(page.posted, [{ source: 'dsh-vscode-bridge', type: 'open-file', path: CARD_PATH }])
+})
+
+test('a mention with no tooltip is left to the app', () => {
+  reset()
+  const untitled = page.addMention(null, CARD_RELATIVE)
+  const event = page.clickOn(untitled)
+  assert.deepEqual(page.posted, [], 'no path, no message')
+  assert.equal(event.defaultPrevented, false)
+  assert.deepEqual(appClicks, [untitled], 'ordinary clicks still reach the app root')
 })
 
 test('the menu follows the display language the host configured', () => {

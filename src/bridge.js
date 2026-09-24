@@ -1488,6 +1488,24 @@
       post({ type: 'open-file', path: produced })
       return
     }
+    // A prose file mention — the clickable inline-code token in the closing
+    // message — carries the file it names in its tooltip. Its own handler asks
+    // the serving Host to open the file: a produced path goes through the
+    // Sidebar, which this page routes to the editor, but a *delivered* path
+    // POSTs to the Host's native opener, which a host without a desktop
+    // answers 409 — the click would do nothing at all. Open the named path
+    // here, like every other card and chip. A markdown link to a local file
+    // carries the same class pair and the same tooltip.
+    var mention = clicked.closest('button[class*="fileMention"]')
+    if (mention !== null && mention !== undefined) {
+      var mentionPath = mention.getAttribute('title')
+      if (mentionPath !== null && mentionPath !== '') {
+        event.preventDefault()
+        event.stopPropagation()
+        post({ type: 'open-file', path: mentionPath })
+        return
+      }
+    }
     var target = clicked.closest('button[class*="fileLink"]')
     if (!target) return
     var row = target.closest('[data-tool]')

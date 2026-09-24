@@ -12,6 +12,12 @@ This work is committed separately from the released `0.4.0`; no version number o
 - The workspace keeper now uses its 120-second idle grace when the override is unset. Previously an
   unset value parsed as zero, so the keeper exited before the Extension Host could attach and the
   sidebar timed out during startup.
+- A file mention in the closing message opened nothing when the file was **delivered** through the `present`
+  tool. The web app sends those gestures to the serving Host's own desktop opener (`/api/present.open`),
+  which answers `409 Host desktop unavailable` on a headless Remote-SSH host, and the failure stays on the
+  delivery card rather than the prose tile. The bridge now serves every prose file mention — produced and
+  delivered alike — from the tile's own tooltip path and opens it in the editor, the way it already served
+  the delivery cards and produced-file chips.
 
 ### Changed
 
