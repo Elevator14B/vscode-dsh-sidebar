@@ -110,6 +110,7 @@ tested CLI and `0.1.5-rc.1` the documented minimum; neither is enforced. The ext
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
+| 0.5.0 | `0.1.5-rc.2` tested, `0.1.5-rc.1` documented | One DSH server per workspace: a detached keeper is shared by every window and Remote-SSH connection of that folder and reaps the CLI after a 120-second idle grace. Closing-message file mentions open in the editor. |
 | 0.4.0 | `0.1.5-rc.2` tested, `0.1.5-rc.1` documented | Direct CLI launch without a version gate; one Extension Host connection ladder that rebuilds the page on a fresh forwarding authority. |
 | 0.3.14 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Extension Host ownership, page connection recovery and history timeout feedback. |
 | 0.3.12 | `0.1.5-rc.2` tested, `0.1.5-rc.1` minimum | Newer CLIs start with a warning in the output channel; older ones are refused. |
