@@ -10,7 +10,7 @@ const mod = { exports: {} }
 const code = buildSync({ entryPoints: [path.resolve(__dirname, '../src/proxy.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
 new Function('require', 'module', 'exports', code)(require, mod, mod.exports)
 
-test('closing the proxy terminates both sides of a live WebSocket and pending HTTP response', { timeout: 5000 }, async t => {
+for (const operation of ['close', 'updateBackend']) test(`${operation} terminates both sides of a live WebSocket and pending HTTP response`, { timeout: 5000 }, async t => {
   const connections = new Set()
   const backend = createServer(() => {})
   backend.on('connection', socket => { connections.add(socket); socket.on('close', () => { connections.delete(socket) }) })
@@ -36,14 +36,18 @@ test('closing the proxy terminates both sides of a live WebSocket and pending HT
   await once(websocket, 'connect')
   websocket.write('GET /api/remote.mux HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
   await once(websocket, 'data')
+  const requested = once(backend, 'request')
   pending.write('GET /waiting HTTP/1.1\r\nHost: localhost\r\n\r\n')
   pending.resume()
+  await requested
   const closed = [websocket, pending].map(socket => new Promise(resolve => { socket.once('close', resolve) }))
-  await Promise.all([proxy.close(), proxy.close()])
+  if (operation === 'close') await Promise.all([proxy.close(), proxy.close()])
+  else proxy.updateBackend(`http://127.0.0.1:${backend.address().port}`, 'replacement-cookie')
   await Promise.all(closed)
   await new Promise(resolve => setTimeout(resolve, 25))
   assert.equal(connections.size, 0, 'upstream sockets must be closed as well')
-  await assert.rejects(proxy.listen(0), /closing/)
+  if (operation === 'close') await assert.rejects(proxy.listen(0), /closing/)
+  else assert.equal((await fetch(proxy.origin + '/__dsh_vscode_health')).status, 200, 'the listener remains available')
 })
 
 test('relisten binds a fresh port and drops the previous listener', { timeout: 5000 }, async t => {
@@ -58,4 +62,3 @@ test('relisten binds a fresh port and drops the previous listener', { timeout: 5
   assert.equal(await fetch(`http://127.0.0.1:${second}/`).then(response => response.text()), 'ok')
   await assert.rejects(fetch(`http://127.0.0.1:${first}/`))
 })
-

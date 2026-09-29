@@ -15,8 +15,10 @@
  *      workspace's manual order and echoes the resulting order;
  *   5. 'workspace/archiveSession' adds one session to the archive set;
  *   6. a second window of the same folder attaches to that same backend;
- *   7. detaching one window leaves the other one working;
- *   8. the last window detaching lets the keeper reap the backend.
+ *   7. browser bridge survives graph synchronization, pins and opens sessions;
+ *   8. a shared restart updates both windows' upstream ports and cookies;
+ *   9. detaching one window leaves the other one working;
+ *  10. the last window detaching lets the keeper reap the backend.
  *
  * Checks 4 and 5 register a throwaway workspace over the temporary directory
  * and delete that registration again, so no user workspace is touched. The
@@ -28,6 +30,8 @@ const { buildSync } = require('esbuild')
 const os = require('node:os')
 const path = require('node:path')
 const { setTimeout: delay } = require('node:timers/promises')
+
+const { browserProbe } = require('./smoke-browser.js')
 
 const RPC_TIMEOUT_MS = 15_000
 
@@ -66,7 +70,7 @@ async function rpc(origin, cookie, method, args) {
   return envelope.result.value
 }
 
-/** Probe the eight contracts; returns undefined on success, a message on failure. */
+/** Probe the ten contracts; returns undefined on success, a message on failure. */
 async function probe() {
   const cwd = mkdtempSync(path.join(os.tmpdir(), 'dsh-sidebar-smoke-'))
   const share = mkdtempSync(path.join(os.tmpdir(), 'dsh-sidebar-share-'))
@@ -84,16 +88,16 @@ async function probe() {
   try {
     origin = await runtime.getWebUrl()
     backendPort = first.find(entry => entry.event === 'runtime.ready')?.backendPort
-    console.log('ok 1/8 keeper launched the installed CLI: ' + origin)
+    console.log('ok 1/10 keeper launched the installed CLI: ' + origin)
     const page = await fetch(origin, { signal: AbortSignal.timeout(RPC_TIMEOUT_MS) })
     if (!page.ok) return 'authenticated proxy answered HTTP ' + String(page.status)
     await page.arrayBuffer()
-    console.log('ok 2/8 launch cookie exchanged and authenticated proxy ready')
+    console.log('ok 2/10 launch cookie exchanged and authenticated proxy ready')
 
     const list = await rpc(origin, cookie, 'session/list', { _request: {} })
     const items = list?.items
     if (!Array.isArray(items)) return 'session/list value.items is not an array'
-    console.log('ok 3/8 session/list returned ' + String(items.length) + ' session(s)')
+    console.log('ok 3/10 session/list returned ' + String(items.length) + ' session(s)')
 
     const created = await rpc(origin, cookie, 'workspace/create', { request: { path: cwd } })
     const workspaceId = created?.workspace?.workspaceId
@@ -109,13 +113,13 @@ async function probe() {
     if (order.indexOf(sessionSecond?.sessionId) !== order.indexOf(sessionFirst?.sessionId) - 1) {
       return 'workspace/insertSessionBefore did not move the second session in front of the first'
     }
-    console.log('ok 4/8 workspace/insertSessionBefore moved a session to the front of ' + String(order.length))
+    console.log('ok 4/10 workspace/insertSessionBefore moved a session to the front of ' + String(order.length))
 
     const archived = await rpc(origin, cookie, 'workspace/archiveSession', { request: { sessionId: sessionSecond?.sessionId } })
     if (!Array.isArray(archived?.archivedSessionIds) || !archived.archivedSessionIds.includes(sessionSecond?.sessionId)) {
       return 'workspace/archiveSession did not report the archived session'
     }
-    console.log('ok 5/8 workspace/archiveSession archived ' + String(sessionSecond?.sessionId))
+    console.log('ok 5/10 workspace/archiveSession archived ' + String(sessionSecond?.sessionId))
 
     const otherOrigin = await other.getWebUrl()
     // The first window's proxy is closed in this step, so cleanup must use this one.
@@ -124,15 +128,31 @@ async function probe() {
     if (otherReady?.shared !== true || otherReady.backendPort !== backendPort) {
       return 'the second window did not attach to the same backend (shared=' + String(otherReady?.shared) + ', port=' + String(otherReady?.backendPort) + ')'
     }
-    console.log('ok 6/8 a second window attached to backend port ' + String(backendPort))
+    console.log('ok 6/10 a second window attached to backend port ' + String(backendPort))
+
+    await browserProbe(origin, cwd, workspaceId, sessionFirst.sessionId)
+    console.log('ok 7/10 browser bridge survives Host graph sync, pins the workspace and opens a session')
+
+    await runtime.restart()
+    const deadline = Date.now() + RPC_TIMEOUT_MS
+    while (!second.some(entry => entry.event === 'runtime.backend-replaced')) {
+      if (Date.now() > deadline) return 'the other window did not observe the shared restart'
+      await delay(25)
+    }
+    backendPort = first.findLast(entry => entry.event === 'runtime.backend-replaced')?.backendPort
+    for (const proxyOrigin of [origin, otherOrigin]) {
+      const afterRestart = await rpc(proxyOrigin, cookie, 'session/list', { _request: {} })
+      if (!Array.isArray(afterRestart?.items)) return 'a window lost authenticated RPC after restart'
+    }
+    console.log('ok 8/10 shared restart refreshed the upstream and cookie in both windows')
 
     await runtime.dispose()
-    const stillServed = await fetch(otherOrigin + '/__dsh_vscode_health', { signal: AbortSignal.timeout(5000) })
-    const served = await stillServed.json()
-    if (!stillServed.ok || served.protocol !== 'dsh-sidebar-health-v1') return 'the remaining window lost its proxy after the first window detached'
+    const stillServed = await fetch(otherOrigin, { signal: AbortSignal.timeout(5000) })
+    await stillServed.arrayBuffer()
+    if (!stillServed.ok) return 'the remaining window lost its backend after the first window detached'
     const firstClosed = await fetch(origin, { signal: AbortSignal.timeout(2000) }).then(() => false, () => true)
     if (!firstClosed) return 'the detached window still accepts requests through its proxy'
-    console.log('ok 7/8 detaching one window left the other one working')
+    console.log('ok 9/10 detaching one window left the other one working')
     return undefined
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -157,7 +177,7 @@ async function probe() {
         console.error('smoke: the keeper did not reap the backend after the last window detached')
         process.exitCode = 1
       } else {
-        console.log('ok 8/8 the last window detaching let the keeper reap the backend')
+        console.log('ok 10/10 the last window detaching let the keeper reap the backend')
       }
     }
     rmSync(cwd, { recursive: true, force: true })

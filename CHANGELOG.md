@@ -3,6 +3,25 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## 0.5.2
+
+### Fixed
+
+- Keep the injected bridge in every DSH 0.2 client graph update. Previously the first live Host
+  snapshot removed it, leaving the sidebar at `connecting` and repeatedly rebuilding or restarting.
+- Stop assigning to the read-only `remote.session` RPC namespace, which failed bridge activation.
+  File opens continue through the resource service and HTTP interception.
+- Use `uiWorkspace.openSession` and `uiWorkspace.selection` for DSH 0.2 navigation and reference insertion;
+  guard direct Session retention so restored selections remain inside the window's workspace.
+- Refresh every attached window's proxy destination and authentication cookie when the keeper replaces
+  the shared backend, closing streams that still belong to the previous process.
+
+### Added
+
+- Browser contract checks against the real CLI: graph synchronization, bridge activation, workspace
+  publication, Session selection and composer binding. The smoke also verifies authenticated requests
+  through both windows after a shared restart.
+
 ## 0.5.1
 
 ### Changed

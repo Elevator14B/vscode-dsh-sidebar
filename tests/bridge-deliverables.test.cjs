@@ -254,7 +254,6 @@ function createPage(options = {}) {
   const sessionsList = snapshot({
     phase: 'ready',
     ids: [ROOT],
-    current: ROOT,
     byId: { [ROOT]: { id: ROOT, displayTitle: ROOT, cwd: PIN, blank: false, running: false, updatedAt: 1 } },
   })
   const workspacesList = snapshot({
@@ -267,15 +266,13 @@ function createPage(options = {}) {
     sessions: {
       list: sessionsList,
       scope: () => undefined,
-      open() {},
-      openSubagent() {},
+      retain() { return { release() {} } },
       async create() { return 'session-created' },
       async fork() { return 'session-forked' },
       binding(id) { return { session: { async rename() { return { ok: true, value: {} } } } } },
-      clear() {},
     },
     workspaces: { list: workspacesList },
-    uiWorkspace: { async connectWorkspace() { return ROOT }, async archiveSession() {} },
+    uiWorkspace: { selection: snapshot({ sessionId: ROOT }), openSession() {}, clearMain() {}, async connectWorkspace() { return ROOT }, async archiveSession() {} },
     conversation: {},
     theme: {},
     sidebarRight: { openResource() {} },

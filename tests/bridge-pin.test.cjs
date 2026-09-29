@@ -83,7 +83,8 @@ const rows = {
   [TWIN_B]: row(TWIN_B, PIN, undefined, { title: 'twin' }),
 }
 
-const sessionsList = snapshot({ phase: 'ready', ids: Object.keys(rows), current: undefined, byId: rows })
+const sessionsList = snapshot({ phase: 'ready', ids: Object.keys(rows), byId: rows })
+const selection = snapshot({})
 const workspacesList = snapshot({
   phase: 'ready',
   items: [
@@ -96,23 +97,26 @@ const sessions = {
   list: sessionsList,
   /** Agent-scope face read by the reference-insert path; this mount has none. */
   scope() { return undefined },
-  open(id) { calls.push(['open', id]) },
-  openSubagent(address) { calls.push(['openSubagent', address.childSessionId]) },
+  retain(target, options) { calls.push(['retain', target, options]); return { release() {} } },
   async create(options = {}) { calls.push(['create', options]); return 'session-created' },
   async fork(options) { calls.push(['fork', options.sessionId]); return 'session-child' },
   binding(id) {
     return { sessionId: id, session: { async rename(title) { return { ok: true, value: { title, seq: 0 } } } } }
   },
-  clear() { calls.push(['clear']) },
 }
 
 let connectDelay
 const uiWorkspace = {
+  selection,
+  openSession(target) {
+    const id = typeof target === 'string' ? target : target.childSessionId
+    calls.push(['open', id])
+    selection.set({ sessionId: id })
+  },
+  clearMain() { calls.push(['clear']); selection.set({}) },
   async connectWorkspace(workspaceId) {
     calls.push(['connectWorkspace', workspaceId])
-    // Reality: the app reuses/creates a blank session in that workspace and
-    // opens it, which moves `current` back inside the pinned folder.
-    sessionsList.set({ ...sessionsList.getSnapshot(), current: ROOT })
+    // connectWorkspace reuses/creates a blank; openSession selects it later.
     if (connectDelay) await connectDelay
     return ROOT
   },
@@ -125,7 +129,10 @@ const remote = new Proxy({}, {
   get(_target, property) { throw new Error(`cannot get property "remote.${String(property)}" without inject`) },
 })
 
+const syncedGraphs = []
+const entries = { async sync(graph) { assert.equal(this, entries); syncedGraphs.push(graph); return 'synced' } }
 const services = {
+  modules: { entries },
   sessions,
   workspaces: { list: workspacesList },
   uiWorkspace,
@@ -133,7 +140,11 @@ const services = {
   theme: {},
   sidebarRight: { openResource(address) { calls.push(['openResource', address]) } },
   remote,
-  'remote.session': { async openWorkspacePath(request) { calls.push(['openWorkspacePath', request.path]); return { ok: true, value: { opened: true } } } },
+  // DSH 0.2 exposes RPC namespaces as read-only proxies. Assigning a method
+  // throws in strict mode and Cordis disposes the entire bridge plugin.
+  'remote.session': new Proxy({ async openWorkspacePath(request) { calls.push(['openWorkspacePath', request.path]); return { ok: true, value: { opened: true } } } }, {
+    set() { return false },
+  }),
 }
 const ctx = {
   get: (name) => services[name],
@@ -150,9 +161,40 @@ assert.ok(pluginRow, 'the bridge registered its plugin row')
 pluginRow.factory(require).apply(ctx)
 
 const settle = () => new Promise((resolve) => { setImmediate(resolve) })
-const setCurrent = (id) => { sessionsList.set({ ...sessionsList.getSnapshot(), current: id }) }
+const setCurrent = (id) => { selection.set({ sessionId: id }) }
 const reset = () => { calls.length = 0; posted.length = 0 }
 const touchedPin = () => calls.some(([kind]) => kind === 'connectWorkspace' || kind === 'create')
+
+test('a read-only RPC namespace leaves the bridge active and publishing its workspace', async () => {
+  await settle()
+  assert.ok(posted.some(message => message.type === 'workspace-state'), 'workspace effects run after plugin activation')
+  assert.ok(calls.some(([kind, id]) => kind === 'connectWorkspace' && id === PIN_WS), 'the workspace is pinned')
+})
+
+test('every Host graph sync preserves the bridge, excludes the native sidebar and keeps other updates', async () => {
+  const hostGraph = {
+    rev: 'host-2',
+    entries: [{ id: 'new-plugin', rev: 'new-rev' }, { id: '@deepseek-ai/dsh-client-ui-sidebar' }],
+    batches: [{ phase: 'application', entries: ['new-plugin', '@deepseek-ai/dsh-client-ui-sidebar'] }],
+  }
+  const original = structuredClone(hostGraph)
+  assert.equal(await entries.sync(hostGraph), 'synced')
+  assert.deepEqual(hostGraph, original, 'the Host snapshot is never mutated')
+  const overlaid = syncedGraphs.at(-1)
+  assert.deepEqual(overlaid.entries.map(row => row.id), ['new-plugin', '@dsh/vscode-embed-bridge'])
+  assert.equal(overlaid.entries[0].rev, 'new-rev')
+  assert.deepEqual(overlaid.batches[0].entries, ['new-plugin', '@dsh/vscode-embed-bridge'])
+  await entries.sync(overlaid)
+  assert.deepEqual(syncedGraphs.at(-1), overlaid, 'reapplying the overlay creates no duplicate entries')
+})
+
+test('direct retention accepts local subagent addresses and refuses a foreign session', () => {
+  reset()
+  const target = { parentSessionId: ROOT, childSessionId: CHILD }
+  sessions.retain(target, { source: 'mainView' })
+  assert.deepEqual(calls[0], ['retain', target, { source: 'mainView' }])
+  assert.throws(() => sessions.retain(FOREIGN, { source: 'workspaceOperation' }), /outside the folder/)
+})
 
 test('a pinned root keeps the pin satisfied', async () => {
   reset()
@@ -191,10 +233,10 @@ test('a foreign root still re-pins the pinned workspace', async () => {
 
 test('the scope guard lets a cwd-less child through and still refuses a foreign root', async () => {
   reset()
-  sessions.open(CHILDLESS)
+  uiWorkspace.openSession(CHILDLESS)
   assert.deepEqual(calls, [['open', CHILDLESS]], JSON.stringify({ calls, posted }))
   reset()
-  sessions.open(FOREIGN)
+  uiWorkspace.openSession(FOREIGN)
   assert.equal(calls.some(([kind]) => kind === 'open'), false, JSON.stringify(calls))
   assert.equal(posted.some(message => message.type === 'scope-blocked' && message.sessionId === FOREIGN), true, JSON.stringify(posted))
 })
@@ -213,7 +255,8 @@ test('row facts keep row identity, so membership changes still repaint', async (
 
 test('session clicks wait for catalog readiness and keep only the last selection', async () => {
   reset()
-  sessionsList.set({ ...sessionsList.getSnapshot(), phase: 'loading', current: ROOT })
+  sessionsList.set({ ...sessionsList.getSnapshot(), phase: 'loading' })
+  setCurrent(ROOT)
   for (const sessionId of [ROOT, CHILD, GRANDCHILD]) {
     for (const listener of messageListeners) listener({ data: { source: 'dsh-vscode-host', type: 'open-session', sessionId } })
   }

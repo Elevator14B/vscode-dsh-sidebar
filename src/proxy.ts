@@ -79,11 +79,21 @@ export class DshBridgeProxy {
    * needs to hold or forward DSH auth state.
    */
   constructor(
-    private readonly backendOrigin: string,
+    private backendOrigin: string,
     private readonly bridgeSource: string,
     private readonly config: BridgeConfig,
-    private readonly browserAuthCookie: string | undefined,
+    private browserAuthCookie: string | undefined,
   ) {}
+
+  /** Replace the upstream after a keeper restart, retaining this window's origin. */
+  updateBackend(origin: string, cookie: string): void {
+    this.backendOrigin = origin
+    this.browserAuthCookie = cookie
+    // Existing HTTP streams and WebSockets belong to the previous backend.
+    // Close both sides so reconnects use the new origin and authentication.
+    for (const request of this.requests) request.destroy()
+    for (const socket of this.sockets) socket.destroy()
+  }
 
   /** Bind the proxy on a loopback port. */
   listen(requestedPort = 0): Promise<number> {

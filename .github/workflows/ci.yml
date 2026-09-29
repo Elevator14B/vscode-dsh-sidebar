@@ -43,6 +43,7 @@ jobs:
       # Keep this in step with the CLI version the README documents as tested.
       - name: Install the DeepSeek Harness CLI
         run: npm install -g @deepseek-ai/dsh@0.2.0-rc.1
+      - run: npx playwright install --with-deps chromium
       - run: npm run smoke
 
   contract-latest:
@@ -58,4 +59,5 @@ jobs:
       - run: npm ci
       - name: Install the latest DeepSeek Harness CLI
         run: npm install -g @deepseek-ai/dsh@latest
+      - run: npx playwright install --with-deps chromium
       - run: npm run smoke

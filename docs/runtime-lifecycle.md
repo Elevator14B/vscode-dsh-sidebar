@@ -29,7 +29,9 @@ the number of attached Hosts.
 
 Each attached Host opens its own control socket and its own window proxy; it never owns the backend. The
 keeper broadcasts to all of them, so they observe one backend's life: the same launch, cookie, restart and
-failure. A Host that detaches closes only its own socket.
+failure. On a replacement `ready`, each Host updates its proxy's upstream origin and cookie, closes
+streams belonging to the previous backend and notifies the view to reload. Its proxy authority stays
+the same. A Host that detaches closes only its own socket.
 
 Cleanup is separate from the window. The keeper gives the CLI its own process group and tracks the process
 tree: Linux snapshots record PID and kernel start time for descendants, including observed descendants that
@@ -154,14 +156,17 @@ its launch URL across stdout chunks, so token framing is exercised too.
 fixture: concurrent `getWebUrl()` calls share one backend; a second runtime on the same folder attaches to
 the same keeper and backend port and keeps working after the first one disposes; the backend is reaped after
 the last detach; different folders keep different keepers and backends; `restart()` replaces the shared
-backend without changing the window's proxy authority; and a SIGKILLed keeper is replaced on the next attach
+backend without changing either window's proxy authority, with authenticated upstream requests verifying
+that both windows use the new backend port and cookie; and a SIGKILLed keeper is replaced on the next attach
 while its orphaned backend is reaped.
 
 `tests/proxy-lifecycle.test.cjs` holds real WebSocket and HTTP connections open during teardown and verifies
 that `relisten` binds a fresh port and drops the old listener. `npm run smoke` (scripts/smoke.js) exercises
 the installed DSH CLI through `DshRuntime` and the keeper: keeper launch, the cookie-authenticated proxy
 page, `session/list`, `workspace/insertSessionBefore`, `workspace/archiveSession`, a second window attaching
-to the same backend port, one window detaching while the other keeps working, and the last detach letting
+to the same backend port, browser bridge activation across full Host graph updates, workspace publication,
+Session selection and composer binding, shared restart with authenticated RPC through both windows,
+one window detaching while the other keeps working, and the last detach letting
 the keeper reap the backend. The smoke and the lifecycle test point the keeper at a temporary share
 directory with a shortened idle grace (`DSH_EMBED_SHARE_DIR`, `DSH_EMBED_IDLE_GRACE_MS`; test overrides, not
 settings), so they never touch a real window's records.

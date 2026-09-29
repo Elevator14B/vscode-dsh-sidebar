@@ -12,6 +12,7 @@ npm ci
 npm install -g @deepseek-ai/dsh   # the runtime the extension drives
 npm run typecheck
 npm test
+npx playwright install chromium  # browser contract checks
 npm run smoke                     # spawns a real dsh and probes the contracts
 ```
 

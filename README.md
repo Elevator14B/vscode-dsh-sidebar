@@ -95,7 +95,8 @@ Then open the DSH Sidebar icon in the activity bar (or run **DSH Sidebar: Open A
 npm ci
 npm run typecheck  # extension host types
 npm test           # unit tests (node --test, no extension host needed)
-npm run smoke      # contract test against a real `dsh` on PATH
+npx playwright install chromium
+npm run smoke      # HTTP and browser contracts against a real `dsh` on PATH
 npm run build      # bundles dist/extension.js and dist/bridge.js with esbuild
 npm run package    # builds and produces dsh-sidebar-<version>.vsix
 ```
@@ -110,6 +111,7 @@ tested CLI and the documented minimum; neither is enforced. The extension no lon
 
 | dsh-sidebar | DeepSeek Harness | Notes |
 | --- | --- | --- |
+| 0.5.2 | `0.2.0-rc.1` tested | Preserve the bridge across live client graph updates, use the new Session selection API, and reconnect every window's proxy after a shared restart. Includes browser contract checks. |
 | 0.5.1 | `0.2.0-rc.1` tested and documented | Contract smoke and the documented environment moved to DSH `0.2.0-rc.1`. |
 | 0.5.0 | `0.1.5-rc.2` tested, `0.1.5-rc.1` documented | One DSH server per workspace: a detached keeper is shared by every window and Remote-SSH connection of that folder and reaps the CLI after a 120-second idle grace. Closing-message file mentions open in the editor. |
 | 0.4.0 | `0.1.5-rc.2` tested, `0.1.5-rc.1` documented | Direct CLI launch without a version gate; one Extension Host connection ladder that rebuilds the page on a fresh forwarding authority. |

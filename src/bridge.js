@@ -487,7 +487,7 @@
     pendingOpens = []
     try {
       if (!sessionInScope(id)) throw outOfScope('session', id)
-      state.services.sessions.open(id)
+      state.services.uiWorkspace.openSession(id)
       post({ type: 'open-session-received', sessionId: id })
     } catch (error) {
       post({ type: 'open-session-error', sessionId: id, message: String(error) })
@@ -534,7 +534,7 @@
     var connect = bridgeConnect === null ? services.uiWorkspace.connectWorkspace : bridgeConnect
     connect(workspace.workspaceId).then(function (sessionId) {
       try {
-        services.sessions.open(sessionId)
+        services.uiWorkspace.openSession(sessionId)
         post({ type: 'new-session-ack', sessionId: sessionId })
       } catch (error) {
         post({ type: 'new-session-error', sessionId: sessionId, message: String(error) })
@@ -621,6 +621,12 @@
 
   /** Bridge-owned `uiWorkspace.connectWorkspace`, exempt from the scope guard. */
   var bridgeConnect = null
+
+  /** Selection belongs to the UI workspace service in DSH 0.2, not the catalog. */
+  function currentSessionId() {
+    var uiWorkspace = state.services && state.services.uiWorkspace
+    return uiWorkspace ? uiWorkspace.selection.getSnapshot().sessionId : undefined
+  }
 
   /** Resolve the Workspace record the window is pinned to by folder path. */
   function pinnedWorkspace() {
@@ -725,7 +731,7 @@
     }
     var sessions = services.sessions
     var conversation = services.conversation
-    var current = sessions.list.getSnapshot().current
+    var current = currentSessionId()
     debug.current = current || null
     if (!current) {
       noteInputFailure('no-session')
@@ -1792,41 +1798,38 @@
     return
   }
 
-  var alreadyRegistered = boot.entries.some(function (entry) { return entry && entry.id === PLUGIN_ID })
-  if (!alreadyRegistered) {
-    boot.entries.push({
+  // DSH 0.2 reconciles the complete Host graph after connecting and on each
+  // live update. Apply the same page-local overlay to every graph, otherwise
+  // that first snapshot removes our bridge and restores DSH's own sidebar.
+  function embeddedBootGraph(graph) {
+    var entries = graph.entries.filter(function (entry) {
+      return !(entry && (entry.id === PLUGIN_ID || entry.id === '@deepseek-ai/dsh-client-ui-sidebar'))
+    })
+    entries.push({
       id: PLUGIN_ID,
       url: '/__dsh_vscode_bridge.js',
       rev: 'vscode-bridge-1',
       inject: [],
       immediately: false,
     })
+    var batches = graph.batches.map(function (row) {
+      return Object.assign({}, row, { entries: row.entries.filter(function (id) {
+        return id !== PLUGIN_ID && id !== '@deepseek-ai/dsh-client-ui-sidebar'
+      }) })
+    })
     var batch = null
-    for (var i = boot.batches.length - 1; i >= 0; i--) {
-      if (boot.batches[i] && boot.batches[i].phase === 'application') {
-        batch = boot.batches[i]
+    for (var i = batches.length - 1; i >= 0; i--) {
+      if (batches[i].phase === 'application') {
+        batch = batches[i]
         break
       }
     }
-    if (batch === null) batch = boot.batches[boot.batches.length - 1]
-    if (batch && Array.isArray(batch.entries)) batch.entries.push(PLUGIN_ID)
+    if (batch === null) batch = batches[batches.length - 1]
+    if (batch) batch.entries.push(PLUGIN_ID)
+    return Object.assign({}, graph, { entries: entries, batches: batches })
   }
 
-  // The embedded view replaces the DSH sidebar (workspace/session browser)
-  // with the VS Code folder. Remove the sidebar client plugin from the boot
-  // graph entirely: no CSS masking, the region never mounts. The workspace
-  // controller and uiWorkspace service stay for auto-pinning; only the
-  // sidebar presentation plugin is dropped.
-  boot.entries = boot.entries.filter(function (entry) {
-    return !(entry && entry.id === '@deepseek-ai/dsh-client-ui-sidebar')
-  })
-  for (var b = 0; b < boot.batches.length; b++) {
-    if (boot.batches[b] && Array.isArray(boot.batches[b].entries)) {
-      boot.batches[b].entries = boot.batches[b].entries.filter(function (id) {
-        return id !== '@deepseek-ai/dsh-client-ui-sidebar'
-      })
-    }
-  }
+  Object.assign(boot, embeddedBootGraph(boot))
 
   // The AppFrame grid still reserves the sidebar/details tracks even with the
   // sidebar plugin removed (a closed sidebar keeps a 56px rail, an untouched
@@ -1889,7 +1892,7 @@
         // creating — a blank session, which is what made clicking a subagent
         // jump to an empty new session. Membership is decided by the same
         // lineage-aware predicate the scope guard uses.
-        var current = sessionsList.current
+        var current = currentSessionId()
         if (current !== undefined && sessionInScope(current)) {
           resetPinFailure()
           return
@@ -1908,7 +1911,7 @@
           workspaces.create({ path: workspacePath }).then(function (resolved) {
             if (resolved && resolved.workspaceId) {
               return bridgeConnect(resolved.workspaceId).then(function (sessionId) {
-                sessions.open(sessionId)
+                uiWorkspace.openSession(sessionId)
                 resetPinFailure()
               })
             }
@@ -1925,7 +1928,7 @@
           return
         }
         bridgeConnect(workspace.workspaceId).then(function (sessionId) {
-          sessions.open(sessionId)
+          uiWorkspace.openSession(sessionId)
           resetPinFailure()
         }).catch(function (error) {
           pinError = String((error && error.message) || error)
@@ -1943,6 +1946,16 @@
         inject: ['sessions', 'workspaces', 'uiWorkspace', 'conversation', 'theme'],
         apply: function (ctx) {
           debug.plugin = true
+          ctx.inject(['modules'], function (modulesCtx) {
+            var modules = modulesCtx.get('modules')
+            var entries = modules && modules.entries
+            if (!entries || typeof entries.sync !== 'function') return
+            var sync = entries.sync
+            entries.sync = function (graph) { return sync.call(entries, embeddedBootGraph(graph)) }
+            modulesCtx.effect(function () {
+              return function () { entries.sync = sync }
+            }, 'vscode-embed-bridge: preserve page-local entries during graph sync')
+          })
           state.services = {
             sessions: ctx.get('sessions'),
             workspaces: ctx.get('workspaces'),
@@ -1975,8 +1988,8 @@
             var uiWorkspace = ctx.get('uiWorkspace')
             if (!sessions || !uiWorkspace || workspacePath === '') return function () {}
             var connect = uiWorkspace.connectWorkspace
-            var open = sessions.open
-            var openSubagent = sessions.openSubagent
+            var open = uiWorkspace.openSession
+            var retain = sessions.retain
             var create = sessions.create
             var fork = sessions.fork
             var archive = uiWorkspace.archiveSession
@@ -1992,16 +2005,17 @@
               if (pinned !== undefined) return connect.call(uiWorkspace, pinned.workspaceId)
               return Promise.reject(outOfScope('workspace', workspaceId))
             }
-            sessions.open = function (sessionId) {
-              if (sessionInScope(sessionId)) return open.call(sessions, sessionId)
+            uiWorkspace.openSession = function (target) {
+              var sessionId = typeof target === 'string' ? target : target && target.childSessionId
+              if (sessionInScope(sessionId)) return open.call(uiWorkspace, target)
               post({ type: 'scope-blocked', sessionId: sessionId, message: outOfScope('session', sessionId).message })
             }
-            sessions.openSubagent = function (address) {
-              if (address !== undefined && sessionInScope(address.childSessionId)) {
-                return openSubagent.call(sessions, address)
-              }
-              var childId = address === undefined ? '' : address.childSessionId
-              post({ type: 'scope-blocked', sessionId: childId, message: outOfScope('session', childId).message })
+            // Internal navigation and rename operations retain directly, so
+            // guard allocation as well as the public view-selection method.
+            sessions.retain = function (target, options) {
+              var sessionId = typeof target === 'string' ? target : target && target.childSessionId
+              if (!sessionInScope(sessionId)) throw outOfScope('session', sessionId)
+              return retain.call(sessions, target, options)
             }
             sessions.create = function (opts) {
               var options = opts === undefined ? {} : opts
@@ -2031,12 +2045,12 @@
             // A selection restored before this guard installed cannot keep the
             // stage; its writer, if the page already activated one, stays live
             // until this backend restarts.
-            var current = sessions.list.getSnapshot().current
-            if (current !== undefined && !sessionInScope(current)) sessions.clear()
+            var current = currentSessionId()
+            if (current !== undefined && !sessionInScope(current)) uiWorkspace.clearMain()
             return function () {
               uiWorkspace.connectWorkspace = connect
-              sessions.open = open
-              sessions.openSubagent = openSubagent
+              uiWorkspace.openSession = open
+              sessions.retain = retain
               sessions.create = create
               sessions.fork = fork
               uiWorkspace.archiveSession = archive
@@ -2066,28 +2080,9 @@
               return function () { sidebarRight.openResource = openResource }
             }, 'vscode-embed-bridge: file resource editor routing')
           })
-          // Releases before the resource face: the app's own file opener is a
-          // host RPC that hands the path to the host's native opener, which has
-          // no window here. Serve it as an editor open instead, keeping the
-          // success the caller expects. The namespace is its own dotted service,
-          // so it is read by that name and waited for; reaching it through the
-          // `remote` face needs an injection this plugin does not declare.
-          ctx.inject(['remote.session'], function (remoteCtx) {
-            var session = remoteCtx.get('remote.session')
-            if (!session || typeof session.openWorkspacePath !== 'function') return
-            var openWorkspacePath = session.openWorkspacePath
-            session.openWorkspacePath = function (request, signal) {
-              var path = request !== null && typeof request === 'object' && typeof request.path === 'string'
-                ? request.path
-                : undefined
-              if (path === undefined || path === '') return openWorkspacePath.call(session, request, signal)
-              post({ type: 'open-file', path: path })
-              return Promise.resolve({ ok: true, value: { opened: true } })
-            }
-            remoteCtx.effect(function () {
-              return function () { session.openWorkspacePath = openWorkspacePath }
-            }, 'vscode-embed-bridge: workspace path opens in the editor')
-          })
+          // RPC namespaces such as remote.session are read-only in DSH 0.2.
+          // File opens are routed above through sidebarRight and by the fetch
+          // fallback; patching the RPC face would dispose this entire plugin.
           if (lastConfiguredTheme !== null) applyThemeThroughService(lastConfiguredTheme)
           // Another window (or the settings invalidation feed) may rewrite the
           // preference in this page; re-apply the VS Code theme whenever the
@@ -2109,10 +2104,12 @@
             var listener = function () { reconcileAutoPin(ctx) }
             var offSessions = sessions.list.subscribe(listener)
             var offWorkspaces = workspaces.list.subscribe(listener)
+            var offSelection = ctx.get('uiWorkspace').selection.subscribe(listener)
             listener()
             return function () {
               offSessions()
               offWorkspaces()
+              offSelection()
               if (triggerPin !== null) triggerPin = null
             }
           }, 'vscode-embed-bridge: workspace pin gate')
@@ -2125,9 +2122,11 @@
               insertQueuedRefs()
             }
             var unsubscribe = sessions.list.subscribe(sync)
+            var offSelection = ctx.get('uiWorkspace').selection.subscribe(sync)
             sync()
             return function () {
               unsubscribe()
+              offSelection()
               if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer)
               pendingOpenTimer = null
             }

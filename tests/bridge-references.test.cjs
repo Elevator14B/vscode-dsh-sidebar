@@ -176,7 +176,7 @@ function createInput() {
 }
 
 const sessionRow = { id: 'session-1', cwd: PIN, title: 'root', blank: false, running: false, updatedAt: 1 }
-const sessionsList = snapshot({ phase: 'ready', ids: ['session-1'], current: 'session-1', byId: { 'session-1': sessionRow } })
+const sessionsList = snapshot({ phase: 'ready', ids: ['session-1'], byId: { 'session-1': sessionRow } })
 const workspacesList = snapshot({
   phase: 'ready',
   items: [{ workspaceId: 'ws-pinned', path: PIN, sessionIds: ['session-1'] }],
@@ -187,15 +187,13 @@ const services = {
   sessions: {
     list: sessionsList,
     scope: (sessionId) => ({ sessionId }),
-    open() {},
-    openSubagent() {},
+    retain() { return { release() {} } },
     async create() { return 'session-created' },
     async fork() { return 'session-forked' },
     binding() { return { session: { async rename() { return { ok: true, value: {} } } } } },
-    clear() {},
   },
   workspaces: { list: workspacesList },
-  uiWorkspace: { async connectWorkspace() { return 'session-1' }, async archiveSession() {} },
+  uiWorkspace: { selection: snapshot({ sessionId: 'session-1' }), openSession() {}, clearMain() {}, async connectWorkspace() { return 'session-1' }, async archiveSession() {} },
   conversation: { input: { for: () => input } },
   theme: {},
   sidebarRight: { openResource() {} },
@@ -373,9 +371,9 @@ test('a rejected chip appends the mention to the draft and reports text-fallback
   )
 })
 
-test('with no current session the refs stay queued and a list change inserts them', async () => {
+test('with no current session the refs stay queued and a UI selection change inserts them', async () => {
   reset()
-  sessionsList.set({ ...sessionsList.getSnapshot(), current: undefined })
+  services.uiWorkspace.selection.set({})
   drop({ 'text/plain': DROPPED_TEXT, 'vscode-editor-data': EDITOR_DATA })
   await resolveWith([hostRef(MENTION)])
 
@@ -390,8 +388,8 @@ test('with no current session the refs stay queued and a list change inserts the
     'nothing can be inserted without an input',
   )
 
-  // Opening a session re-publishes the sessions list; the awaited ref flushes.
-  sessionsList.set({ ...sessionsList.getSnapshot(), current: 'session-1' })
+  // Opening a session publishes UI selection separately from the catalog.
+  services.uiWorkspace.selection.set({ sessionId: 'session-1' })
   await settle()
 
   assert.equal(lastResult().outcome, 'inserted', 'the retry must report the real insertion')

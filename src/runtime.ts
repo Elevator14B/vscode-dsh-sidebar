@@ -161,7 +161,6 @@ export class DshRuntime implements vscode.Disposable {
         return
       }
       await client.restart(ATTACH_DEADLINE_MS)
-      this.change.fire()
     })().finally(() => { if (this.restarting === pending) this.restarting = undefined })
     this.restarting = pending
     return pending
@@ -211,7 +210,7 @@ export class DshRuntime implements vscode.Disposable {
     const keeperPath = path.join(this.context.extensionUri.fsPath, 'dist', 'runtime-keeper.js')
     const location = await untilAborted(ensureKeeper(cwd, keeperPath, START_TIMEOUT_MS, this.telemetry), generation.abort.signal)
     generation.client = location.client
-    generation.stopObserving = location.client.onEvent(event => { this.observe(event) })
+    generation.stopObserving = location.client.onEvent(event => { this.observe(generation, event) })
     // A keeper that dies takes the shared backend with it: drop readiness so the
     // connection ladder attaches again — and forks a replacement — instead of
     // proxying into a closed port forever.
@@ -242,7 +241,15 @@ export class DshRuntime implements vscode.Disposable {
     return proxy.origin
   }
 
-  private observe(event: KeeperEvent): void {
+  private observe(generation: Generation, event: KeeperEvent): void {
+    if (this.current !== generation || generation.abort.signal.aborted || this.disposed) return
+    if (event.type === 'ready' && generation.proxy !== undefined) {
+      const backend = new URL(event.url)
+      generation.proxy.updateBackend(backend.origin, event.cookie)
+      this.telemetry('runtime.backend-replaced', { backendPort: Number(backend.port), backendPid: event.pid })
+      this.change.fire()
+      return
+    }
     if (event.type === 'log') { this.output.append(event.text); return }
     if (event.type === 'failure') { this.output.appendLine(`[runtime] ${event.message}`); return }
     if (event.type === 'state') this.telemetry('runtime.keeper-state', { state: event.state, clients: event.clients })

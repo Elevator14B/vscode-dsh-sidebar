@@ -40,9 +40,10 @@ function setup(t, options = {}) {
     env: { language: 'en' },
     workspace: { getConfiguration: () => ({ get: (key, fallback) => key === 'command' ? fixture : fallback }) },
     EventEmitter: class {
-      event = () => ({ dispose() {} })
-      fire() {}
-      dispose() {}
+      listeners = new Set()
+      event = listener => { this.listeners.add(listener); return { dispose: () => this.listeners.delete(listener) } }
+      fire() { for (const listener of this.listeners) listener() }
+      dispose() { this.listeners.clear() }
     },
   }
   const mod = { exports: {} }
@@ -114,15 +115,36 @@ test('different folders keep their own keeper and backend', { timeout: 40000 }, 
     second.events.find(entry => entry.event === 'runtime.ready').keeperPid)
 })
 
-test('restart replaces the shared backend without replacing the window proxy', { timeout: 40000 }, async t => {
+test('restart updates every window proxy to the new backend port and cookie', { timeout: 40000 }, async t => {
   const f = setup(t)
   const url = await f.runtime.getWebUrl()
+  const second = setup(t, { folder: f.folder, share: f.share })
+  const secondUrl = await second.runtime.getWebUrl()
   const before = f.pids()[0].pid
+  // A restart deliberately closes old connections. Do not let undici race
+  // that shutdown by reusing its pooled pre-restart socket for the new probe.
+  const initial = await fetch(url, { headers: { connection: 'close' } })
+  assert.equal(initial.status, 200)
+  assert.equal(initial.headers.get('x-fixture-pid'), String(before))
+  await initial.text()
+  let firstChanges = 0
+  let secondChanges = 0
+  f.runtime.onDidChange(() => { firstChanges += 1 })
+  second.runtime.onDidChange(() => { secondChanges += 1 })
   await f.runtime.restart()
   await until(() => f.pids().length === 2, 15000)
   assert.notEqual(f.pids()[1].pid, before)
   assert.equal(await f.runtime.getWebUrl(), url, 'the window keeps its proxy authority')
-  assert.equal((await fetch(url + '/__dsh_vscode_health')).status, 200)
+  assert.equal(await second.runtime.getWebUrl(), secondUrl, 'the other window keeps its proxy authority')
+  await until(() => secondChanges > 0)
+  assert.equal(firstChanges, 1, 'the restarting window reloads once')
+  assert.equal(secondChanges, 1, 'other attached windows also reload')
+  for (const origin of [url, secondUrl]) {
+    const response = await fetch(origin)
+    assert.equal(response.status, 200, 'the actual upstream accepts the replacement cookie')
+    assert.equal(response.headers.get('x-fixture-pid'), String(f.pids()[1].pid))
+    assert.equal(await response.text(), 'fixture')
+  }
 })
 
 test('a killed keeper is replaced and its orphaned backend is reaped', { timeout: 60000 }, async t => {

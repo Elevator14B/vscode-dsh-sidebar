@@ -10,7 +10,15 @@ if (process.env.FIXTURE_MODE === 'never-ready') {
 } else {
   const server = http.createServer((req, res) => {
     if (process.env.FIXTURE_MODE === 'auth-hang') return
-    if (process.env.FIXTURE_MODE !== 'missing-cookie') res.setHeader('set-cookie', 'fixture=session; HttpOnly')
+    const cookie = `fixture=session-${process.pid}`
+    if (req.url.includes('token=fixture-token')) {
+      if (process.env.FIXTURE_MODE !== 'missing-cookie') res.setHeader('set-cookie', cookie + '; HttpOnly')
+    } else if (req.headers.cookie !== cookie) {
+      res.writeHead(401)
+      res.end('stale or missing backend cookie')
+      return
+    }
+    res.setHeader('x-fixture-pid', String(process.pid))
     res.end('fixture')
   })
   server.listen(0, '127.0.0.1', () => {
