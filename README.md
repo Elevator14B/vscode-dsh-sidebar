@@ -9,7 +9,7 @@ sidebar webview, pinned to the current workspace folder. It drives the open-sour
 yourself.
 
 - Maintainer: [@Elevator14B](https://github.com/Elevator14B)
-- Environment: VS Code 1.96+, DSH `0.1.5-rc.1` or newer (tested with `0.1.5-rc.2`), Node.js 22+ on the
+- Environment: VS Code 1.96+, DSH `0.2.0-rc.1` or newer (tested with `0.2.0-rc.1`), Node.js 22+ on the
   host's `PATH`. Those CLI versions are documentation, not a gate: the extension launches the configured
   command directly and reports what it does.
 - Runtime: one detached workspace keeper per folder owns the `dsh` backend on the machine that hosts the
@@ -104,8 +104,8 @@ Press <kbd>F5</kbd> in VS Code to launch an Extension Development Host.
 
 ## Compatibility
 
-DeepSeek Harness is in developer preview and does ship compatibility-breaking changes. `0.1.5-rc.2` is the
-tested CLI and `0.1.5-rc.1` the documented minimum; neither is enforced. The extension no longer probes
+DeepSeek Harness is in developer preview and does ship compatibility-breaking changes. `0.2.0-rc.1` is the
+tested CLI and the documented minimum; neither is enforced. The extension no longer probes
 `dsh --version` (there is no `src/dsh-version.ts`) and never refuses a CLI before launching it.
 
 | dsh-sidebar | DeepSeek Harness | Notes |

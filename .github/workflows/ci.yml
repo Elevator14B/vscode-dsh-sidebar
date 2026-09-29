@@ -42,7 +42,7 @@ jobs:
       - run: npm ci
       # Keep this in step with the CLI version the README documents as tested.
       - name: Install the DeepSeek Harness CLI
-        run: npm install -g @deepseek-ai/dsh@0.1.5-rc.2
+        run: npm install -g @deepseek-ai/dsh@0.2.0-rc.1
       - run: npm run smoke
 
   contract-latest:

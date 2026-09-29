@@ -3,6 +3,13 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
+## Unreleased
+
+### Changed
+
+- The tested DeepSeek Harness CLI is now `0.2.0-rc.1`: the README compatibility notes and the CI contract
+  job pin that version, and `npm run smoke` passes against it.
+
 ## 0.5.0
 
 ### Fixed
