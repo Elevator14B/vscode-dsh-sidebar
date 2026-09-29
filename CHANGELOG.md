@@ -3,7 +3,7 @@
 All notable changes to this project. The version numbers continue the sequence this extension used before
 its first public release; `0.3.11` is the first version published on GitHub.
 
-## Unreleased
+## 0.5.1
 
 ### Changed
 
