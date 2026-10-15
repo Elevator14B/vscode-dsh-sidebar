@@ -1356,6 +1356,27 @@ async function writeClipboardRequest(message: BridgeEnvelope, respond: (value: u
   }
 }
 
+/**
+ * Answer one 'readClipboard' request, the host half of paste. The page cannot
+ * read the editor clipboard either, so the host reads it and reports the text
+ * instead of leaving the bridge's promise pending; nothing throws out of this
+ * function. The text is the user's own clipboard and is never logged.
+ */
+async function readClipboardRequest(message: BridgeEnvelope, respond: (value: unknown) => void): Promise<void> {
+  let value: { readonly ok: boolean; readonly text?: string; readonly message?: string }
+  try {
+    const text = await vscode.env.clipboard.readText()
+    value = { ok: true, text }
+  } catch (error) {
+    value = { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+  try {
+    respond({ type: 'response', requestId: message.requestId, value })
+  } catch (_error) {
+    /* the webview relay is gone; there is nothing left to answer */
+  }
+}
+
 /** Workspace membership the page publishes for the folder this window pins. */
 interface WorkspaceStateMessage {
   readonly workspaceId?: string
@@ -1374,8 +1395,9 @@ function handleBridgeMessage(
   onSessionsDirty?: () => void,
 ): void {
   if (message.source !== 'dsh-vscode-bridge' || typeof message.type !== 'string') return
-  // Copied content is user data: for the two clipboard messages log only the
-  // byte length, never the text itself. Other messages keep their short text.
+  // Copied content is user data: the two copy paths log only the byte length,
+  // never the text itself, and a pasted read carries no text into the log at
+  // all. Other messages keep their short text.
   const clipboardText = message.type === 'copy-text'
     ? message.text
     : message.type === 'request' && message.requestType === 'writeClipboard'
@@ -1453,6 +1475,11 @@ function handleBridgeMessage(
         // The page cannot reach the editor clipboard itself; the bridge awaits
         // this response, so answer it even when the write fails.
         void writeClipboardRequest(message, respond)
+      }
+      if (message.requestType === 'readClipboard' && typeof message.requestId === 'string') {
+        // The mirror of the write for paste: the page cannot reach the editor
+        // clipboard, so the host reads it and answers with the text.
+        void readClipboardRequest(message, respond)
       }
       return
     }

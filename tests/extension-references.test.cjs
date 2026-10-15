@@ -126,6 +126,9 @@ const windowWarnings = []
 const outputChannels = []
 const clipboardWrites = []
 let clipboardError = null
+const clipboardReads = []
+let clipboardReadText = ''
+let clipboardReadError = null
 let activeEditor
 let registeredProvider
 let commandResults = () => undefined
@@ -181,6 +184,11 @@ const fakeVscode = {
       writeText: async (text) => {
         if (clipboardError !== null) throw clipboardError
         clipboardWrites.push(String(text))
+      },
+      readText: async () => {
+        clipboardReads.push(true)
+        if (clipboardReadError !== null) throw clipboardReadError
+        return clipboardReadText
       },
     },
     asExternalUri: async (uri) => uri,
@@ -832,6 +840,66 @@ test('a writeClipboard request is answered and writes the host clipboard', async
   assert.ok(failed, JSON.stringify(posts))
   assert.deepEqual(failed.value, { ok: false, message: 'clipboard unavailable' })
   clipboardError = null
+})
+
+test('a readClipboard request is answered with the host clipboard text', async () => {
+  resetWindow()
+  posts.length = 0
+  clipboardReads.length = 0
+  clipboardReadText = 'pasted through the host'
+  clipboardReadError = null
+  receive({
+    source: 'dsh-vscode-bridge',
+    type: 'request',
+    requestType: 'readClipboard',
+    requestId: 'rc-1',
+  })
+  await flush()
+  const response = posts.find(message => message.type === 'response' && message.requestId === 'rc-1')
+  assert.ok(response, 'the awaited request must be answered: ' + JSON.stringify(posts))
+  assert.deepEqual(response.value, { ok: true, text: 'pasted through the host' })
+  assert.equal(clipboardReads.length, 1, 'the host clipboard is read once per request')
+
+  // A failing host clipboard answers ok:false instead of leaving the page pending.
+  clipboardReadError = new Error('clipboard unavailable')
+  posts.length = 0
+  receive({
+    source: 'dsh-vscode-bridge',
+    type: 'request',
+    requestType: 'readClipboard',
+    requestId: 'rc-2',
+  })
+  await flush()
+  const failedRead = posts.find(message => message.type === 'response' && message.requestId === 'rc-2')
+  assert.ok(failedRead, JSON.stringify(posts))
+  assert.deepEqual(failedRead.value, { ok: false, message: 'clipboard unavailable' })
+  clipboardReadError = null
+})
+
+test('readClipboard telemetry records neither the request nor the pasted content', async () => {
+  resetWindow()
+  const output = outputChannels[0]
+  const secret = 'secret-pasted-content-4711'
+  clipboardReadText = secret
+  clipboardReadError = null
+  const before = output.lines.length
+  receive({
+    source: 'dsh-vscode-bridge',
+    type: 'request',
+    requestType: 'readClipboard',
+    requestId: 'rc-tel',
+  })
+  await flush()
+
+  const added = output.lines.slice(before)
+  const requestLine = added.find(line => line.startsWith('[telemetry] bridge.request') && line.includes('readClipboard'))
+  assert.ok(requestLine, JSON.stringify(added))
+  const requestData = JSON.parse(requestLine.slice('[telemetry] bridge.request '.length))
+  assert.equal(requestData.requestType, 'readClipboard')
+  // Pasted content is the user's own clipboard: it must never reach the log,
+  // not in the request line and not in the response the page receives.
+  for (const line of added) assert.equal(line.includes(secret), false, line)
+  clipboardReadText = ''
 })
 
 test('clipboard telemetry records the length, never the copied content', async () => {

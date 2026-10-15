@@ -1300,6 +1300,267 @@
   patchClipboardWriteText()
   patchExecCommand()
 
+  // ---- clipboard bridging ---------------------------------------------------
+  // The embedded page owns no clipboard, and this host performs neither the
+  // clipboard's nor the editor's default action for it, so every clipboard
+  // gesture is bridged here through the host -- the reader and the writer that
+  // actually reach the user's clipboard:
+  //
+  //  * copy and cut -- the selection is read here and written through the host
+  //    ('copy-text'). A cut also removes it, by splicing the composer's live
+  //    selection away through the editor's own verb rather than through a
+  //    browser editing command the editor never applies.
+  //  * paste -- this host delivers the shortcut's key long before its own paste,
+  //    and that paste carries readable data yet still leaves the composer empty.
+  //    The key is therefore what the bridge listens for: it takes the text from
+  //    the host and hands the page a paste its own editor does act on, so the
+  //    caret, the reference chips, the undo history and the app's U+FFFC
+  //    placeholder screening all stay the app's business.
+  //
+  // Every path is additive: a selection is one the user already made, and a
+  // paste the page could read for itself is left completely alone.
+
+  /** Whether a key event is one accelerator letter, without extra modifiers. */
+  function isAccelerator(event, letter) {
+    if (event.altKey === true || event.shiftKey === true) return false
+    if (event.metaKey !== true && event.ctrlKey !== true) return false
+    return typeof event.key === 'string' && event.key.toLowerCase() === letter
+  }
+
+  /** The element a clipboard gesture hands its re-delivery to. */
+  function pasteTargetOf(event) {
+    return event.target && event.target.nodeType === 1 ? event.target : document.activeElement
+  }
+
+  /**
+   * The composer's input facade with a live snapshot, or null when it cannot be
+   * used. The draft guard and the cut verb both resolve the editor this way.
+   */
+  function composerState() {
+    var input = resolveInput()
+    if (!inputCanInsert(input)) return null
+    try {
+      var snapshot = input.state.getSnapshot()
+      return snapshot ? { input: input, snapshot: snapshot } : null
+    } catch (_error) {
+      return null
+    }
+  }
+
+  /** Length of the composer draft, or null when it cannot be read. */
+  function draftLengthNow() {
+    var state = composerState()
+    return state && typeof state.snapshot.draft === 'string' ? state.snapshot.draft.length : null
+  }
+
+  /**
+   * Whether the page could read this paste by itself. What decides it is
+   * whether a payload is actually readable -- not which types the frame
+   * advertises: a frame can list `types` while withholding every payload, and a
+   * rich-text copy carries `text/html` while carrying no plain text at all.
+   * Probing both kinds is what keeps the patch additive: anything readable is
+   * left completely alone, so it never competes with a working paste and never
+   * inserts a second copy of one.
+   */
+  function pasteHasOwnData(clipboardData) {
+    if (!clipboardData) return false
+    var kinds = ['text/plain', 'text/html']
+    for (var i = 0; i < kinds.length; i++) {
+      try {
+        if (String(clipboardData.getData(kinds[i]) || '') !== '') return true
+      } catch (_error) {
+        /* an unreadable payload counts as no data */
+      }
+    }
+    return false
+  }
+
+  /** Hand host clipboard text to the page as a paste its own editor accepts. */
+  function redeliverPaste(target, text) {
+    var data = null
+    try {
+      data = new DataTransfer()
+      data.setData('text/plain', text)
+    } catch (_error) {
+      data = null
+    }
+    if (data === null) return false
+    var event = null
+    try {
+      event = new ClipboardEvent('paste', {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+      })
+    } catch (_error) {
+      event = null
+    }
+    if (event === null) return false
+    // Mark the bridge's own re-delivery: the paste listener below must never
+    // mistake it for the host's late duplicate of an earlier gesture. Stopping
+    // it there would keep the editor from ever seeing it, so pressing the
+    // shortcut a second time on the same clipboard would paste nothing.
+    event.__dshBridgedPaste = true
+    var node = target && typeof target.dispatchEvent === 'function'
+      ? target
+      : (document.activeElement || document.body)
+    if (!node || typeof node.dispatchEvent !== 'function') return false
+    try {
+      node.dispatchEvent(event)
+      return true
+    } catch (_error) {
+      return false
+    }
+  }
+
+  /** Text this bridge last handed the composer, and when, for late-duplicate detection. */
+  var pasteDeliveredText = ''
+  var pasteDeliveredAt = 0
+  /** How long after a bridged insertion a matching real paste is still the same gesture. */
+  var PASTE_DUPLICATE_WINDOW_MS = 1500
+  /** The paste shortcut's pending bridge, cancelled by a paste that lands first. */
+  var pasteFallbackTimer = null
+  /** Draft length when the paste shortcut was pressed, or null when unreadable. */
+  var pasteKeyDraftLength = null
+
+  function cancelPasteFallback() {
+    if (pasteFallbackTimer === null) return
+    clearTimeout(pasteFallbackTimer)
+    pasteFallbackTimer = null
+  }
+
+  /**
+   * Take the host clipboard and hand it to the page, remembering the text so the
+   * host's own late paste of it is not inserted a second time.
+   */
+  function pasteFromHost(target) {
+    return requestHost('readClipboard', {}).then(function (value) {
+      var text = value && typeof value.text === 'string' ? value.text : ''
+      if (text === '' || !redeliverPaste(target, text)) return false
+      pasteDeliveredText = text
+      pasteDeliveredAt = Date.now()
+      return true
+    })
+  }
+
+  /**
+   * Whether this paste event is the gesture already inserted from the host. This
+   * host delivers the shortcut's own paste well after the key, so the bridged
+   * insertion wins the race and the real event follows it; swallowing that one
+   * is what keeps the text from landing twice. A genuine second paste carries
+   * the same text only if the user copied nothing in between, which is the one
+   * case this deliberately trades away.
+   */
+  function isLateDuplicatePaste(event) {
+    if (pasteDeliveredAt === 0 || Date.now() - pasteDeliveredAt > PASTE_DUPLICATE_WINDOW_MS) return false
+    if (pasteDeliveredText === '') return false
+    try {
+      var data = event.clipboardData
+      return data !== null && data !== undefined
+        && String(data.getData('text/plain') || '') === pasteDeliveredText
+    } catch (_error) {
+      return false
+    }
+  }
+
+  /**
+   * Remove the composer's live selection through the editor's own verb.
+   *
+   * `caretSpan()` is the live selection in the editor's detect coordinates and
+   * `insertText` splices a span down to the text given, so an empty text removes
+   * exactly the selection while keeping reference chips, the revision counter
+   * and the undo history consistent. The browser's own editing command cannot do
+   * this here -- the editor never applies it -- so this is the path that makes a
+   * cut actually cut.
+   */
+  function cutSelectionFromComposer() {
+    var state = composerState()
+    if (!state) return false
+    if (typeof state.input.insertText !== 'function' || typeof state.input.caretSpan !== 'function') return false
+    if (typeof state.snapshot.draftRev !== 'number') return false
+    try {
+      var span = state.input.caretSpan()
+      if (!span || !(span.end > span.start)) return false
+      return state.input.insertText('', { start: span.start, end: span.end, draftRev: state.snapshot.draftRev }) === true
+    } catch (_error) {
+      return false
+    }
+  }
+
+  document.addEventListener('paste', function (event) {
+    // This webview delivers the shortcut's own paste late -- after the bridged
+    // insertion below has already put the same text in -- so a late event
+    // carrying exactly what was just delivered is the same gesture, not a second
+    // one. The bridge's own re-delivery carries a marker and is exempt: it is
+    // the insertion itself, and swallowing it would paste nothing at all.
+    if (event.__dshBridgedPaste !== true && isLateDuplicatePaste(event)) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    // The host's own paste arrived. Stand the fallback down only when the paste
+    // can be shown to have landed: this host's paste carries readable data yet
+    // leaves the composer untouched, so cancelling on the event alone would
+    // leave the paste uninserted. An unreadable draft is treated as landed,
+    // because a wrong guess there would insert the text twice.
+    var landed = draftLengthNow()
+    if (landed === null || pasteKeyDraftLength === null || landed !== pasteKeyDraftLength) cancelPasteFallback()
+    if (pasteHasOwnData(event.clipboardData)) return
+    pasteFromHost(pasteTargetOf(event))
+  }, true)
+
+  document.addEventListener('keydown', function (event) {
+    var copying = isAccelerator(event, 'c')
+    var cutting = isAccelerator(event, 'x')
+    if (copying || cutting) {
+      // Every selection is taken -- the composer's draft and the transcript's
+      // output alike -- because the embed copies neither on its own. The write
+      // is plain text: the only shape the editor clipboard write has, and what
+      // reading the output is for.
+      var text = selectedText()
+      if (text === '') return
+      post({ type: 'copy-text', text: text })
+      if (!cutting) return
+      // Only a field has something to remove: the transcript is read-only, so a
+      // cut there keeps its clipboard half and changes nothing.
+      var active = document.activeElement
+      var inField = Boolean(active) && (active.isContentEditable === true
+        || active.tagName === 'TEXTAREA' || active.tagName === 'INPUT')
+      if (!inField) return
+      // The key is claimed so the embed's own cut cannot remove the same
+      // selection a second time.
+      event.preventDefault()
+      if (cutSelectionFromComposer()) return
+      // A plain field has no editor verb; its own editing command can remove the
+      // selection. The clipboard half has already landed either way.
+      try {
+        if (typeof document.execCommand === 'function') document.execCommand('delete')
+      } catch (_error) {
+        /* a failed delete leaves the text, which the user can still remove */
+      }
+      return
+    }
+    if (!isAccelerator(event, 'v')) return
+    // The shortcut's key arrives long before the host's own paste, and that
+    // paste leaves the composer empty, so this is what the bridge listens for:
+    // when the composer has not changed shortly after the key, the text comes
+    // from the host clipboard instead. A paste that landed first cancels the
+    // pending bridge, so a working native paste is never touched.
+    cancelPasteFallback()
+    var target = pasteTargetOf(event)
+    var before = draftLengthNow()
+    pasteKeyDraftLength = before
+    pasteFallbackTimer = setTimeout(function () {
+      pasteFallbackTimer = null
+      // A paste that landed first cancels this timer. If it still ran, either no
+      // paste came or it came without touching the composer; a draft that grew
+      // anyway means something else already inserted, so leave that alone.
+      var now = draftLengthNow()
+      if (before !== null && now !== null && now !== before) return
+      pasteFromHost(target)
+    }, 120)
+  }, true)
+
   // ---- delivered-file cards -------------------------------------------------
 
   var DELIVERED_CARD_SELECTOR = '[data-presented-file]'
